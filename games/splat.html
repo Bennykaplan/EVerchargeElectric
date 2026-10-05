@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Splat — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Splat <span id="modeTag" class="tag-inline"></span></div>
+    <div class="stats">
+      <div class="stat"><small id="scoreLabel">Score</small><b id="score">0</b></div>
+      <div class="stat" id="skillWrap" hidden><small>Pilot skill</small><b id="skill">1</b></div>
+      <div class="stat"><small id="bestLabel">Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+
+  <div class="touch" id="touch">
+    <button class="wide" data-key=" ">Flap</button>
+  </div>
+  <p class="hint" id="hint">Tap to flap. Thread the gaps — they tighten slowly as you go.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var W = 620, H = 560;
+  var canvas = document.getElementById("c");
+  var ctx = A.fit(canvas, W, H);
+  var k = A.keys();
+  var ov = A.overlay(document.getElementById("ov"));
+  var el = {
+    score: document.getElementById("score"), best: document.getElementById("best"),
+    scoreLabel: document.getElementById("scoreLabel"), bestLabel: document.getElementById("bestLabel"),
+    skill: document.getElementById("skill"), skillWrap: document.getElementById("skillWrap"),
+    modeTag: document.getElementById("modeTag"), hint: document.getElementById("hint"),
+    touch: document.getElementById("touch")
+  };
+  var stage = document.querySelector(".stage");
+  A.touchKeys(el.touch, k);
+
+  var GRAV = 1500, FLAP = -420, PIPE_W = 68, GROUND = 72;
+  var FLIP_GAP = 152;              // fixed in flipped mode so the contest is fair
+  var MIN_SPACING = 230;           // you cannot stack columns on top of each other
+  var SURVIVE_TO_WIN = 20;         // the pilot wins if it clears this many of your columns
+
+  var mode = "play";
+  var bird, pipes, score, alive, running, spawn, scroll, bgx, cleared, hoverY, aiCool;
+
+  function reset() {
+    bird = { x: 150, y: H / 2, v: 0, rot: 0 };
+    pipes = [];
+    score = 0; alive = true; spawn = 0; scroll = 170; bgx = 0; cleared = 0; aiCool = 0;
+    el.score.textContent = "0";
+    el.best.textContent = A.best(bestKey());
+    el.skill.textContent = "1";
+    syncLabels();
+  }
+
+  function bestKey() { return mode === "play" ? "splat" : "splat-flip"; }
+
+  function syncLabels() {
+    var flip = mode === "flip";
+    el.modeTag.textContent = flip ? "· you build the course" : "";
+    el.scoreLabel.textContent = flip ? "Columns placed" : "Score";
+    el.bestLabel.textContent = flip ? "Best (fewest)" : "Best";
+    el.skillWrap.hidden = !flip;
+    el.touch.style.display = flip ? "none" : "";
+    el.hint.textContent = flip
+      ? "Click to drop a column — the height you click is where the gap goes. Bring the pilot down in as few columns as you can."
+      : "Tap to flap. Thread the gaps — they tighten slowly as you go.";
+  }
+
+  // --------------------------------------------------------------- the pilot
+  // Skill climbs as it clears columns: it starts sloppy and late, and ends
+  // tight and early. It flies the same physics you do — same gravity, same
+  // flap impulse, same collision test.
+  function skillTier() {
+    if (cleared < 3) return 0;
+    if (cleared < 8) return 1;
+    return 2;
+  }
+  function aiSlack() { return [46, 26, 10][skillTier()]; }      // how far it lets itself sag
+  function aiNoise() { return [34, 16, 5][skillTier()]; }       // aim scatter, px
+  function aiReact() { return [0.10, 0.06, 0.03][skillTier()]; } // min gap between decisions
+
+  function aiThink(dt) {
+    aiCool -= dt;
+    if (aiCool > 0) return;
+    aiCool = aiReact();
+
+    // the next column the bird has not yet passed
+    var next = null;
+    for (var i = 0; i < pipes.length; i++) {
+      if (pipes[i].x + PIPE_W >= bird.x - 4) { next = pipes[i]; break; }
+    }
+
+    var targetY;
+    if (next) {
+      targetY = next.top + next.gap * 0.5 + A.rnd(-aiNoise(), aiNoise());
+      // aim for the gap as it arrives, not where it is now
+      var t = Math.max(0, (next.x - bird.x) / Math.max(scroll, 1));
+      var predicted = bird.y + bird.v * t + 0.5 * GRAV * t * t;
+      if (predicted > targetY + aiSlack()) bird.v = FLAP;
+      return;
+    }
+    // nothing ahead — hold a comfortable cruising height
+    targetY = (H - GROUND) * 0.5;
+    if (bird.y > targetY + aiSlack() * 1.5) bird.v = FLAP;
+  }
+
+  // -------------------------------------------------------------- the course
+  function gapFor(s) { return Math.max(132, 196 - s * 2.2); }
+
+  function addPipe() {
+    var gap = gapFor(score);
+    var margin = 60;
+    var top = A.rnd(margin, H - GROUND - margin - gap);
+    pipes.push({ x: W + PIPE_W, top: top, gap: gap, passed: false });
+  }
+
+  function placeColumn(clickY) {
+    if (mode !== "flip" || !running || !alive) return;
+    // keep a minimum spacing so you cannot build a wall it could never fly
+    for (var i = 0; i < pipes.length; i++) {
+      if (pipes[i].x > W - MIN_SPACING) return;
+    }
+    var gap = FLIP_GAP;
+    var top = A.clamp(clickY - gap / 2, 34, H - GROUND - 34 - gap);
+    pipes.push({ x: W + PIPE_W, top: top, gap: gap, passed: false });
+    score++;
+    el.score.textContent = score;
+  }
+
+  function flap() { if (running && alive && mode === "play") bird.v = FLAP; }
+
+  function die() {
+    alive = false;
+    if (mode === "play") {
+      var b = A.best("splat", score);
+      el.best.textContent = b;
+      ov.show("<h2>Down you go</h2><p>You passed <b>" + score + "</b> column" + (score === 1 ? "" : "s") +
+        (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+        '<button class="btn go" data-act="start-play">Try again</button>' +
+        '<button class="btn" data-act="start-flip">Build the course instead</button>');
+    } else {
+      var prev = 0;
+      try { prev = parseInt(localStorage.getItem("evercharge:splat-flip-raw") || "0", 10) || 0; } catch (e) {}
+      var fewest = prev === 0 ? score : Math.min(prev, score);
+      try { localStorage.setItem("evercharge:splat-flip-raw", String(fewest)); } catch (e) {}
+      el.best.textContent = fewest;
+      ov.show("<h2>You brought it down</h2><p>It crashed on column <b>" + score +
+        "</b>, flying at skill " + (skillTier() + 1) + " of 3.</p>" +
+        '<button class="btn go" data-act="start-flip">Go again</button>' +
+        '<button class="btn" data-act="start-play">Fly it yourself</button>');
+    }
+  }
+
+  function pilotWins() {
+    alive = false;
+    ov.show("<h2>The pilot made it</h2><p>It cleared all <b>" + SURVIVE_TO_WIN +
+      "</b> of your columns. Catch it early — it flies badly for the first few.</p>" +
+      '<button class="btn go" data-act="start-flip">Go again</button>' +
+      '<button class="btn" data-act="start-play">Fly it yourself</button>');
+  }
+
+  function update(dt) {
+    if (!alive) return;
+
+    if (mode === "play") {
+      if (k.tapped(" ") || k.tapped("ArrowUp") || k.tapped("w") || k.tapped("W")) flap();
+      scroll = 170 + Math.min(score * 2.4, 70);
+      spawn -= dt;
+      if (spawn <= 0) { addPipe(); spawn = Math.max(1.12, 1.6 - score * 0.012); }
+    } else {
+      aiThink(dt);
+      scroll = 165;                    // constant, so your placements are predictable
+    }
+
+    bird.v += GRAV * dt;
+    bird.y += bird.v * dt;
+    bird.rot = A.clamp(bird.v / 700, -0.5, 1.2);
+    bgx -= scroll * dt * 0.35;
+
+    for (var i = pipes.length - 1; i >= 0; i--) {
+      var p = pipes[i];
+      p.x -= scroll * dt;
+      if (!p.passed && p.x + PIPE_W < bird.x) {
+        p.passed = true;
+        if (mode === "play") { score++; el.score.textContent = score; }
+        else {
+          cleared++;
+          el.skill.textContent = skillTier() + 1;
+          if (cleared >= SURVIVE_TO_WIN) return pilotWins();
+        }
+      }
+      if (p.x + PIPE_W < -10) pipes.splice(i, 1);
+    }
+
+    var r = 15;
+    if (bird.y + r > H - GROUND) { bird.y = H - GROUND - r; return die(); }
+    if (bird.y - r < 0) { bird.y = r; bird.v = 0; }
+
+    for (var j = 0; j < pipes.length; j++) {
+      var q = pipes[j];
+      if (bird.x + r < q.x || bird.x - r > q.x + PIPE_W) continue;
+      if (bird.y - r < q.top || bird.y + r > q.top + q.gap) return die();
+    }
+  }
+
+  function drawPipe(p) {
+    var g = ctx.createLinearGradient(p.x, 0, p.x + PIPE_W, 0);
+    g.addColorStop(0, "#3FA76F"); g.addColorStop(0.5, "#4CC98A"); g.addColorStop(1, "#2F8558");
+    ctx.fillStyle = g;
+    A.rrect(ctx, p.x, 0, PIPE_W, p.top, 7); ctx.fill();
+    A.rrect(ctx, p.x - 6, p.top - 20, PIPE_W + 12, 20, 6); ctx.fill();
+    var by = p.top + p.gap;
+    A.rrect(ctx, p.x, by, PIPE_W, H - GROUND - by, 7); ctx.fill();
+    A.rrect(ctx, p.x - 6, by, PIPE_W + 12, 20, 6); ctx.fill();
+  }
+
+  function canPlace() {
+    for (var i = 0; i < pipes.length; i++) if (pipes[i].x > W - MIN_SPACING) return false;
+    return true;
+  }
+
+  function draw() {
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, "#1C2740"); sky.addColorStop(1, "#2A3A5C");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = "rgba(255,255,255,.045)";
+    for (var i = -1; i < 5; i++) {
+      var hx = ((bgx % 200) + 200) % 200 + i * 200;
+      ctx.beginPath(); ctx.arc(hx, H - GROUND + 10, 86, Math.PI, 0); ctx.fill();
+    }
+
+    // ghost of the column you are about to drop
+    if (mode === "flip" && running && alive && hoverY != null && canPlace()) {
+      var top = A.clamp(hoverY - FLIP_GAP / 2, 34, H - GROUND - 34 - FLIP_GAP);
+      ctx.fillStyle = "rgba(76,201,138,.22)";
+      ctx.fillRect(W - 54, 0, 46, top);
+      ctx.fillRect(W - 54, top + FLIP_GAP, 46, H - GROUND - top - FLIP_GAP);
+    }
+
+    pipes.forEach(drawPipe);
+
+    ctx.fillStyle = "#2B2F42"; ctx.fillRect(0, H - GROUND, W, GROUND);
+    ctx.fillStyle = "#4CC98A"; ctx.fillRect(0, H - GROUND, W, 5);
+
+    ctx.save();
+    ctx.translate(bird.x, bird.y);
+    ctx.rotate(bird.rot);
+    ctx.fillStyle = mode === "flip" ? "#9B8CF0" : "#F2D06B";
+    ctx.beginPath(); ctx.arc(0, 0, 15, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#F5A15B";
+    ctx.beginPath(); ctx.moveTo(11, 0); ctx.lineTo(23, 4); ctx.lineTo(11, 8); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#12141F";
+    ctx.beginPath(); ctx.arc(6, -5, 3.2, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "rgba(255,255,255,.75)";
+    ctx.beginPath(); ctx.ellipse(-3, 2, 8, 5.5, bird.v / 2200, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+
+    if (running && alive) {
+      ctx.fillStyle = "rgba(255,255,255,.9)";
+      ctx.font = "800 42px 'Bricolage Grotesque', ui-sans-serif, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(mode === "play" ? score : cleared + "/" + SURVIVE_TO_WIN, W / 2, 58);
+      if (mode === "flip") {
+        ctx.font = "600 14px ui-sans-serif, system-ui, sans-serif";
+        ctx.fillStyle = canPlace() ? "rgba(255,255,255,.6)" : "rgba(255,255,255,.22)";
+        ctx.fillText(canPlace() ? "click to drop a column" : "wait for the last column to move along", W / 2, H - 16);
+      }
+    }
+  }
+
+  stage.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
+    if (mode === "play") return flap();
+    var r = canvas.getBoundingClientRect();
+    placeColumn((e.clientY - r.top) * (H / r.height));
+  });
+  canvas.addEventListener("mousemove", function (e) {
+    var r = canvas.getBoundingClientRect();
+    hoverY = (e.clientY - r.top) * (H / r.height);
+  });
+  canvas.addEventListener("mouseleave", function () { hoverY = null; });
+
+  function menu() {
+    running = false;
+    ov.show("<h2>Splat</h2><p>Pick a side.</p>" +
+      '<button class="btn go" data-act="start-play">You fly</button>' +
+      '<button class="btn" data-act="start-flip">You build the course</button>' +
+      '<div class="keys"><b>You fly:</b> space or click to flap, thread the gaps.<br>' +
+      '<b>You build:</b> the computer flies. Click to drop a column where you want the gap, ' +
+      'and try to bring it down. It flies badly at first and sharpens up every few columns.</div>');
+  }
+
+  ov.onClick("[data-act]", function (b) {
+    var act = b.getAttribute("data-act");
+    mode = act === "start-flip" ? "flip" : "play";
+    reset();
+    running = true;
+    ov.hide();
+    if (mode === "play") flap();
+  });
+
+  reset();
+  menu();
+
+  A.loop(function (dt) {
+    if (running) update(dt);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>
