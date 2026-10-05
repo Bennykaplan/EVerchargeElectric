@@ -53,7 +53,7 @@
   A.touchKeys(el.touch, k);
 
   var GRAV = 1500, FLAP = -420, PIPE_W = 68, GROUND = 72;
-  var FLIP_GAP = 152;              // fixed in flipped mode so the contest is fair
+  var FLIP_GAP = 175;              // fixed in flipped mode; wide enough for the flap swing
   var MIN_SPACING = 230;           // you cannot stack columns on top of each other
   var SURVIVE_TO_WIN = 20;         // the pilot wins if it clears this many of your columns
 
@@ -93,9 +93,10 @@
     if (cleared < 8) return 1;
     return 2;
   }
-  function aiSlack() { return [24, 15, 8][skillTier()]; }      // how far it lets itself sag
-  function aiNoise() { return [20, 10, 4][skillTier()]; }       // aim scatter, px
-  function aiReact() { return [0.055, 0.038, 0.025][skillTier()]; } // min gap between decisions
+  function aiSlack() { return 66; }   // tuned so the flap oscillation centres on the gap, not above it
+  function aiNoise() { return [26, 14, 5][skillTier()]; }       // how badly it reads the gap, px
+  function aiReact() { return [0.10, 0.06, 0.03][skillTier()]; } // min gap between decisions
+  var LOOKAHEAD = 0.08;        // seconds. Short on purpose — see below.
 
   function aiThink(dt) {
     aiCool -= dt;
@@ -108,18 +109,21 @@
       if (pipes[i].x + PIPE_W >= bird.x - 4) { next = pipes[i]; break; }
     }
 
+    // Aim at the middle of the gap, with a misread fixed per column so the
+    // bird commits to a line instead of jittering on fresh noise every tick.
     var targetY;
     if (next) {
-      targetY = next.top + next.gap * 0.5 + A.rnd(-aiNoise(), aiNoise());
-      // aim for the gap as it arrives, not where it is now
-      var t = Math.max(0, (next.x - bird.x) / Math.max(scroll, 1));
-      var predicted = bird.y + bird.v * t + 0.5 * GRAV * t * t;
-      if (predicted > targetY + aiSlack()) bird.v = FLAP;
-      return;
+      if (next.aim === undefined) next.aim = A.rnd(-aiNoise(), aiNoise());
+      targetY = next.top + next.gap * 0.5 + next.aim;
+    } else {
+      targetY = (H - GROUND) * 0.5;
     }
-    // nothing ahead — hold a comfortable cruising height
-    targetY = (H - GROUND) * 0.5;
-    if (bird.y > targetY + aiSlack() * 1.5) bird.v = FLAP;
+
+    // Predict only a fraction of a second ahead. Predicting all the way to the
+    // column makes it "always about to be too low", so it flaps nonstop and
+    // pins itself to the ceiling — which is exactly what it used to do.
+    var predicted = bird.y + bird.v * LOOKAHEAD + 0.5 * GRAV * LOOKAHEAD * LOOKAHEAD;
+    if (predicted > targetY + aiSlack()) bird.v = FLAP;
   }
 
   // -------------------------------------------------------------- the course
@@ -317,6 +321,9 @@
     ov.hide();
     if (mode === "play") flap();
   });
+
+  // small hook so the automated tests can read real game state
+  window.__splat = function () { return { bird: bird, pipes: pipes, mode: mode, cleared: cleared, alive: alive }; };
 
   reset();
   menu();
