@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Imitation — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+<style>
+  .lobby{max-width:560px;margin:0 auto;text-align:center}
+  .lobby h2{font-size:1.9rem;margin-bottom:8px}
+  .lobby p{color:var(--ink-soft);margin:0 0 22px}
+  .row{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:14px}
+  .code{
+    font:800 2.6rem/1 var(--mono);letter-spacing:.22em;color:var(--ink);
+    background:var(--surface-2);border:1px solid var(--line);border-radius:14px;
+    padding:18px 10px 18px 22px;margin:6px 0 14px;user-select:all;
+  }
+  #joinCode{
+    width:190px;text-align:center;text-transform:uppercase;letter-spacing:.2em;
+    font:800 1.3rem var(--mono);padding:12px;border-radius:12px;
+    border:1.5px solid var(--line);background:var(--surface-2);color:var(--ink);
+  }
+  .status{color:var(--muted);font-size:.92rem;margin-top:10px;min-height:1.4em}
+  .status.bad{color:var(--bad)} .status.good{color:var(--good)}
+
+  .board{display:grid;grid-template-columns:1fr 1fr;gap:16px;max-width:460px;margin:0 auto}
+  .pad{
+    aspect-ratio:1;border:0;border-radius:22px;background:var(--pc);
+    filter:brightness(.52) saturate(.85);transition:filter .08s ease,transform .08s ease;
+    cursor:pointer;
+  }
+  .pad.lit{filter:brightness(1.5) saturate(1.1);transform:scale(1.03)}
+  .pad:disabled{cursor:default}
+  .board.live .pad:not(:disabled):hover{filter:brightness(.78)}
+
+  .turnbar{text-align:center;margin:0 0 18px}
+  .turnbar .who{font-family:var(--display);font-weight:800;font-size:1.5rem}
+  .turnbar .sub{color:var(--muted);font-size:.92rem;margin-top:4px;min-height:1.3em}
+  .score2{display:flex;justify-content:center;gap:26px;margin:18px 0 0}
+  .score2 div{text-align:center}
+  .score2 small{display:block;font-size:.7rem;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+  .score2 b{font-family:var(--display);font-size:1.5rem}
+  .you b{color:var(--good)}
+
+  .chat{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:22px}
+  .chat button{padding:8px 14px;border-radius:999px;border:1.5px solid var(--line);
+    background:var(--surface);font-size:.88rem;font-weight:600}
+  .chat button:hover{border-color:var(--ink-soft)}
+  .bubble{
+    text-align:center;margin-top:12px;min-height:1.5em;color:var(--warn);
+    font-weight:600;font-size:.95rem;
+  }
+</style>
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Imitation</div>
+    <div class="stats">
+      <div class="stat"><small>Round</small><b id="round">0</b></div>
+    </div>
+  </div>
+
+  <!-- Lobby -->
+  <section id="lobby" class="lobby">
+    <h2>Play against another person</h2>
+    <p>One of you starts a game and reads out the code. The other types it in. You'll be connected browser to browser.</p>
+    <div class="row">
+      <button class="btn go" id="btnCreate">Start a game</button>
+    </div>
+    <div class="row">
+      <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false">
+      <button class="btn" id="btnJoin">Join</button>
+    </div>
+    <div id="codeBox" hidden>
+      <p style="margin-bottom:0">Give your friend this code:</p>
+      <div class="code" id="codeText">----</div>
+      <p style="margin:0">Waiting for them to join…</p>
+    </div>
+    <div class="status" id="lobbyStatus"></div>
+  </section>
+
+  <!-- Game -->
+  <section id="game" hidden>
+    <div class="turnbar">
+      <div class="who" id="who">—</div>
+      <div class="sub" id="sub"></div>
+    </div>
+    <div class="board" id="board">
+      <button class="pad" data-i="0" style="--pc:#4CC98A"></button>
+      <button class="pad" data-i="1" style="--pc:#FF6B6B"></button>
+      <button class="pad" data-i="2" style="--pc:#5BC8E8"></button>
+      <button class="pad" data-i="3" style="--pc:#F2D06B"></button>
+    </div>
+    <div class="score2">
+      <div class="you"><small id="youLabel">You</small><b id="youSteps">0</b></div>
+      <div><small>Opponent</small><b id="oppSteps">0</b></div>
+    </div>
+    <div class="chat" id="chat">
+      <button data-msg="Good luck!">Good luck!</button>
+      <button data-msg="Nice one.">Nice one.</button>
+      <button data-msg="That was lucky.">That was lucky.</button>
+      <button data-msg="Too easy.">Too easy.</button>
+    </div>
+    <div class="bubble" id="bubble"></div>
+  </section>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js"></script>
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+
+  var lobby = document.getElementById("lobby");
+  var gameEl = document.getElementById("game");
+  var statusEl = document.getElementById("lobbyStatus");
+  var codeBox = document.getElementById("codeBox");
+  var codeText = document.getElementById("codeText");
+  var board = document.getElementById("board");
+  var pads = [].slice.call(board.querySelectorAll(".pad"));
+  var whoEl = document.getElementById("who"), subEl = document.getElementById("sub");
+  var roundEl = document.getElementById("round");
+  var youStepsEl = document.getElementById("youSteps"), oppStepsEl = document.getElementById("oppSteps");
+  var bubble = document.getElementById("bubble");
+
+  var peer = null, conn = null, isHost = false;
+  var seq = [];            // the shared pattern both players build
+  var myTurn = false;
+  var phase = "lobby";     // lobby | watch | replay | add | over
+  var replayIdx = 0;
+  var busy = false;        // true while the pattern is playing back
+  var audio = null;
+  var TONES = [329.6, 261.6, 392.0, 220.0];
+
+  function setStatus(msg, kind) {
+    statusEl.textContent = msg || "";
+    statusEl.className = "status" + (kind ? " " + kind : "");
+  }
+
+  function beep(i, ms) {
+    try {
+      if (!audio) audio = new (window.AudioContext || window.webkitAudioContext)();
+      if (audio.state === "suspended") audio.resume();
+      var o = audio.createOscillator(), g = audio.createGain();
+      o.type = "sine";
+      o.frequency.value = TONES[i] || 300;
+      g.gain.setValueAtTime(0.0001, audio.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.2, audio.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, audio.currentTime + ms / 1000);
+      o.connect(g); g.connect(audio.destination);
+      o.start(); o.stop(audio.currentTime + ms / 1000 + 0.02);
+    } catch (e) { /* audio is a nicety, never a blocker */ }
+  }
+
+  function lightPad(i, ms) {
+    var p = pads[i];
+    if (!p) return;
+    p.classList.add("lit");
+    beep(i, ms);
+    setTimeout(function () { p.classList.remove("lit"); }, ms);
+  }
+
+  function playSequence(after) {
+    busy = true;
+    setPadsEnabled(false);
+    var gap = Math.max(260, 620 - seq.length * 22);
+    seq.forEach(function (v, n) {
+      setTimeout(function () { lightPad(v, gap * 0.6); }, n * gap);
+    });
+    setTimeout(function () {
+      busy = false;
+      if (after) after();
+    }, seq.length * gap + 180);
+  }
+
+  function setPadsEnabled(on) {
+    pads.forEach(function (p) { p.disabled = !on; });
+    board.classList.toggle("live", !!on);
+  }
+
+  function send(msg) {
+    if (conn && conn.open) {
+      try { conn.send(msg); } catch (e) { /* link already gone */ }
+    }
+  }
+
+  function updateHud() {
+    roundEl.textContent = seq.length;
+    youStepsEl.textContent = seq.length;
+    oppStepsEl.textContent = seq.length;
+  }
+
+  // ---- turn flow -------------------------------------------------------
+  function beginMyTurn() {
+    myTurn = true;
+    updateHud();
+    if (seq.length === 0) {
+      phase = "add";
+      whoEl.textContent = "Your turn";
+      subEl.textContent = "Start the pattern — press any pad.";
+      setPadsEnabled(true);
+      return;
+    }
+    phase = "watch-then-replay";
+    whoEl.textContent = "Your turn";
+    subEl.textContent = "Watch the pattern…";
+    playSequence(function () {
+      phase = "replay";
+      replayIdx = 0;
+      subEl.textContent = "Now repeat it — " + seq.length + " step" + (seq.length === 1 ? "" : "s");
+      setPadsEnabled(true);
+    });
+  }
+
+  function beginTheirTurn() {
+    myTurn = false;
+    phase = "watch";
+    updateHud();
+    whoEl.textContent = "Their turn";
+    subEl.textContent = "They're repeating the pattern and adding one.";
+    setPadsEnabled(false);
+  }
+
+  function onPad(i) {
+    if (busy || !myTurn) return;
+
+    if (phase === "replay") {
+      lightPad(i, 220);
+      if (i !== seq[replayIdx]) return youLose("You broke the pattern.");
+      replayIdx++;
+      if (replayIdx >= seq.length) {
+        phase = "add";
+        subEl.textContent = "Perfect. Now add one of your own.";
+      } else {
+        subEl.textContent = "Repeat it — " + replayIdx + " / " + seq.length;
+      }
+      return;
+    }
+
+    if (phase === "add") {
+      lightPad(i, 260);
+      seq.push(i);
+      updateHud();
+      setPadsEnabled(false);
+      send({ type: "seq", seq: seq });
+      setTimeout(beginTheirTurn, 320);
+    }
+  }
+
+  function youLose(reason) {
+    phase = "over";
+    setPadsEnabled(false);
+    send({ type: "lost", reason: reason });
+    whoEl.textContent = "You lost";
+    subEl.innerHTML = reason + " The pattern reached <b>" + seq.length + "</b>.<br>" +
+      '<button class="btn go" id="again" style="margin-top:14px">Play again</button>';
+    wireAgain();
+  }
+
+  function theyLost(reason) {
+    phase = "over";
+    setPadsEnabled(false);
+    whoEl.textContent = "You win";
+    subEl.innerHTML = "They broke the pattern at <b>" + seq.length + "</b> steps.<br>" +
+      '<button class="btn go" id="again" style="margin-top:14px">Play again</button>';
+    wireAgain();
+  }
+
+  function wireAgain() {
+    var b = document.getElementById("again");
+    if (b) b.addEventListener("click", function () {
+      send({ type: "restart" });
+      restart(true);
+    });
+  }
+
+  function restart(iStart) {
+    seq = [];
+    updateHud();
+    bubble.textContent = "";
+    if (iStart) beginMyTurn(); else beginTheirTurn();
+  }
+
+  pads.forEach(function (p) {
+    p.addEventListener("click", function () { onPad(parseInt(p.getAttribute("data-i"), 10)); });
+  });
+
+  document.getElementById("chat").addEventListener("click", function (e) {
+    var b = e.target.closest("[data-msg]");
+    if (!b) return;
+    var m = b.getAttribute("data-msg");
+    send({ type: "say", text: m });
+    showBubble("You: " + m);
+  });
+
+  function showBubble(text) {
+    bubble.textContent = text;
+    clearTimeout(showBubble.t);
+    showBubble.t = setTimeout(function () { bubble.textContent = ""; }, 4000);
+  }
+
+  // ---- networking ------------------------------------------------------
+  function handle(msg) {
+    if (!msg || !msg.type) return;
+    if (msg.type === "seq") {
+      seq = msg.seq.slice();
+      updateHud();
+      beginMyTurn();
+    } else if (msg.type === "lost") {
+      theyLost(msg.reason);
+    } else if (msg.type === "restart") {
+      restart(false);
+    } else if (msg.type === "say") {
+      showBubble("Them: " + msg.text);
+    }
+  }
+
+  function wireConn(c) {
+    conn = c;
+    conn.on("open", function () {
+      lobby.hidden = true;
+      gameEl.hidden = false;
+      document.getElementById("youLabel").textContent = isHost ? "You (host)" : "You";
+      if (isHost) beginMyTurn(); else beginTheirTurn();
+    });
+    conn.on("data", handle);
+    conn.on("close", dropped);
+    conn.on("error", dropped);
+  }
+
+  function dropped() {
+    if (phase === "over") return;
+    phase = "over";
+    setPadsEnabled(false);
+    whoEl.textContent = "Disconnected";
+    subEl.innerHTML = "The other player dropped out. " +
+      '<a class="btn" href="imitation.html" style="margin-top:14px;display:inline-block">Start over</a>';
+  }
+
+  function newCode() {
+    var alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no look-alikes
+    var s = "";
+    for (var i = 0; i < 4; i++) s += alphabet[Math.floor(Math.random() * alphabet.length)];
+    return s;
+  }
+
+  function peerError(e) {
+    if (e && e.type === "peer-unavailable") {
+      setStatus("No game found with that code. Check it and try again.", "bad");
+      document.getElementById("btnJoin").disabled = false;
+      return;
+    }
+    if (e && e.type === "unavailable-id") {
+      setStatus("That code was taken, generating another…");
+      setTimeout(createGame, 300);
+      return;
+    }
+    setStatus("Connection problem: " + (e && e.type ? e.type : "unknown") +
+      ". Some school and office networks block this kind of direct connection.", "bad");
+  }
+
+  function createGame() {
+    isHost = true;
+    var code = newCode();
+    setStatus("Setting up…");
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    peer = new Peer("evcg-" + code, { debug: 0 });
+    peer.on("open", function () {
+      codeText.textContent = code;
+      codeBox.hidden = false;
+      setStatus("Ready — waiting for a second player.", "good");
+    });
+    peer.on("connection", function (c) { wireConn(c); });
+    peer.on("error", peerError);
+  }
+
+  function joinGame() {
+    var code = (document.getElementById("joinCode").value || "").trim().toUpperCase();
+    if (code.length !== 4) { setStatus("Enter the 4-character code.", "bad"); return; }
+    isHost = false;
+    document.getElementById("btnJoin").disabled = true;
+    setStatus("Connecting…");
+    if (peer) { try { peer.destroy(); } catch (e) {} }
+    peer = new Peer({ debug: 0 });
+    peer.on("open", function () {
+      var c = peer.connect("evcg-" + code, { reliable: true });
+      wireConn(c);
+      setTimeout(function () {
+        if (!conn || !conn.open) {
+          setStatus("Couldn't reach that game. Make sure the code is right and they're still waiting.", "bad");
+          document.getElementById("btnJoin").disabled = false;
+        }
+      }, 9000);
+    });
+    peer.on("error", peerError);
+  }
+
+  document.getElementById("btnCreate").addEventListener("click", createGame);
+  document.getElementById("btnJoin").addEventListener("click", joinGame);
+  document.getElementById("joinCode").addEventListener("keydown", function (e) {
+    if (e.key === "Enter") joinGame();
+  });
+
+  if (typeof Peer === "undefined") {
+    setStatus("Couldn't load the connection library. Check your internet and refresh.", "bad");
+  }
+})();
+</script>
+</body>
+</html>

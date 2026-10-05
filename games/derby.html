@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Home Run Derby — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Home Run Derby</div>
+    <div class="stats">
+      <div class="stat"><small>Home runs</small><b id="hr">0</b></div>
+      <div class="stat"><small>Longest</small><b id="far">—</b></div>
+      <div class="stat"><small>Outs</small><b id="outs">0/10</b></div>
+      <div class="stat"><small>Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+  <p class="hint">Left click to swing. Time it so you connect as the ball reaches the plate. Letting a pitch go by costs you nothing.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var W = 760, H = 540;
+  var canvas = document.getElementById("c");
+  var ctx = A.fit(canvas, W, H);
+  var ov = A.overlay(document.getElementById("ov"));
+  var el = {
+    hr: document.getElementById("hr"), far: document.getElementById("far"),
+    outs: document.getElementById("outs"), best: document.getElementById("best")
+  };
+
+  // --- field layout, in world pixels ---------------------------------------
+  var GROUND = 430;          // the dirt line
+  var PLATE = 120;           // where contact happens
+  var CONTACT_Y = 358;
+  var WALL = 580;            // outfield wall, 460px from the plate
+  var WALL_H = 70;
+  var MOUND = 470;
+  var GRAV = 1250;
+  var FT_PER_PX = 0.72;      // tuned so the wall reads ~330 ft
+  var MAX_OUTS = 10;
+
+  // Swing timing bands, measured in pixels between the ball and the plate at
+  // the moment you click. Generous on purpose — this should be learnable.
+  var BARREL = 26, SOLID = 48, WHIFF = 78;
+
+  var state, ball, pitchT, pitchDur, nextIn, swingAnim, resultText, resultColor;
+  var hrs, outs, longest, pitches, running, msgT;
+
+  function sync() {
+    el.hr.textContent = hrs;
+    el.far.textContent = longest ? longest + " ft" : "—";
+    el.outs.textContent = outs + "/" + MAX_OUTS;
+    el.best.textContent = A.best("derby");
+  }
+
+  function newGame() {
+    hrs = 0; outs = 0; longest = 0; pitches = 0;
+    state = "wait"; nextIn = 1.1; swingAnim = 0; resultText = ""; msgT = 0;
+    ball = null;
+    sync();
+  }
+
+  // Pitches get a little quicker as you go, then stop getting quicker.
+  function pitchTime() {
+    return Math.max(0.82, 1.28 - hrs * 0.025) + A.rnd(-0.05, 0.05);
+  }
+
+  function throwPitch() {
+    pitches++;
+    pitchDur = pitchTime();
+    pitchT = 0;
+    ball = {
+      x: MOUND + 40, y: 250, vx: 0, vy: 0,
+      from: { x: MOUND + 40, y: 250 },
+      to: { x: 20, y: CONTACT_Y + A.rnd(-14, 14) }
+    };
+    state = "pitch";
+  }
+
+  function swing() {
+    if (!running) return;
+    if (state !== "pitch") return;
+    swingAnim = 0.22;
+
+    var off = Math.abs(ball.x - PLATE);
+
+    if (off > WHIFF) { return resolve("miss", 0, 0); }
+
+    // how centred the contact was, 1 = dead on the barrel
+    var centred = A.clamp(1 - off / WHIFF, 0, 1);
+
+    if (off <= BARREL) {
+      resolve("barrel", A.rnd(920, 1010), A.rnd(28, 33));
+    } else if (off <= SOLID) {
+      resolve("solid", A.rnd(700, 880), A.rnd(18, 40));
+    } else {
+      // late or early enough that it's a weak grounder or a lazy pop-up
+      if (Math.random() < 0.5) resolve("weak", A.rnd(420, 600), A.rnd(5, 14));
+      else resolve("weak", A.rnd(380, 520), A.rnd(55, 70));
+    }
+  }
+
+  function resolve(kind, speed, angleDeg) {
+    if (kind === "miss") {
+      ball = null;
+      state = "result";
+      msgT = 1.0;
+      resultText = "Swing and a miss";
+      resultColor = "#FF8A7D";
+      outs++;
+      sync();
+      if (outs >= MAX_OUTS) return gameOver();
+      nextIn = 0.9;
+      return;
+    }
+    var th = angleDeg * Math.PI / 180;
+    ball.x = PLATE;
+    ball.y = CONTACT_Y;
+    ball.vx = Math.cos(th) * speed;
+    ball.vy = -Math.sin(th) * speed;
+    ball.kind = kind;
+    ball.peak = ball.y;
+    state = "hit";
+  }
+
+  function landed() {
+    var feet = Math.round((ball.x - PLATE) * FT_PER_PX);
+    var cleared = ball.cleared;
+    state = "result";
+    msgT = 1.3;
+    if (cleared) {
+      hrs++;
+      if (feet > longest) longest = feet;
+      resultText = feet + " ft — HOME RUN";
+      resultColor = "#F2D06B";
+    } else {
+      outs++;
+      resultText = ball.kind === "weak"
+        ? (feet < 120 ? "Grounded out" : "Popped up") + " · " + feet + " ft"
+        : "Caught at the track · " + feet + " ft";
+      resultColor = "#FF8A7D";
+    }
+    sync();
+    if (!cleared && outs >= MAX_OUTS) return gameOver();
+    nextIn = 1.0;
+  }
+
+  function gameOver() {
+    running = false;
+    var b = A.best("derby", hrs);
+    el.best.textContent = b;
+    ov.show("<h2>Round over</h2><p>You hit <b>" + hrs + "</b> home run" + (hrs === 1 ? "" : "s") +
+      (longest ? ", longest <b>" + longest + " ft</b>" : "") +
+      (hrs >= b && hrs > 0 ? " — a new best!" : "") + "</p>" +
+      '<button class="btn go" data-act="restart">Swing again</button>' +
+      '<a class="btn" href="../index.html">All games</a>');
+  }
+
+  function update(dt) {
+    if (msgT > 0) msgT -= dt;
+    if (swingAnim > 0) swingAnim -= dt;
+
+    if (state === "wait" || state === "result") {
+      nextIn -= dt;
+      if (nextIn <= 0) throwPitch();
+      return;
+    }
+
+    if (state === "pitch") {
+      pitchT += dt;
+      var p = pitchT / pitchDur;
+      ball.x = ball.from.x + (ball.to.x - ball.from.x) * p;
+      // a gentle sag so it reads like a real pitch rather than a laser
+      ball.y = ball.from.y + (ball.to.y - ball.from.y) * p + Math.sin(p * Math.PI) * 16;
+      if (p >= 1) {          // let it go by — costs nothing
+        ball = null;
+        state = "wait";
+        nextIn = 0.7;
+      }
+      return;
+    }
+
+    if (state === "hit") {
+      ball.vy += GRAV * dt;
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+      if (ball.y < ball.peak) ball.peak = ball.y;
+
+      // crossing the wall: over the top is gone, into it is off the wall
+      if (ball.cleared === undefined && ball.x >= WALL) {
+        ball.cleared = ball.y < GROUND - WALL_H;
+        if (!ball.cleared) { ball.vx = -Math.abs(ball.vx) * 0.3; ball.hitWall = true; }
+      }
+      if (ball.y >= GROUND - 6) { ball.y = GROUND - 6; if (ball.cleared === undefined) ball.cleared = false; return landed(); }
+      if (ball.x > 2600) { ball.cleared = true; return landed(); }
+    }
+  }
+
+  // --- drawing --------------------------------------------------------------
+  function camera() {
+    if (state === "hit" && ball) return A.clamp(700 / Math.max(ball.x + 60, 700), 0.34, 1);
+    return 1;
+  }
+
+  function draw() {
+    var sky = ctx.createLinearGradient(0, 0, 0, H);
+    sky.addColorStop(0, "#141A2C");
+    sky.addColorStop(1, "#263453");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    var cam = camera();
+    ctx.save();
+    ctx.translate(0, H);
+    ctx.scale(cam, cam);
+    ctx.translate(0, -H);
+
+    // outfield grass
+    ctx.fillStyle = "#1F6B3C";
+    ctx.fillRect(0, GROUND, 2800, H - GROUND + 300);
+    ctx.fillStyle = "rgba(255,255,255,.04)";
+    for (var s = 0; s < 26; s++) ctx.fillRect(s * 110, GROUND, 55, 400);
+
+    // infield dirt
+    ctx.fillStyle = "#8A6236";
+    ctx.beginPath();
+    ctx.ellipse(PLATE + 60, GROUND + 26, 240, 52, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    // wall
+    ctx.fillStyle = "#2B3350";
+    ctx.fillRect(WALL, GROUND - WALL_H, 16, WALL_H);
+    ctx.fillStyle = "#F2D06B";
+    ctx.fillRect(WALL, GROUND - WALL_H, 16, 5);
+    ctx.fillStyle = "rgba(255,255,255,.55)";
+    ctx.font = "700 13px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(Math.round((WALL - PLATE) * FT_PER_PX) + " ft", WALL + 8, GROUND - WALL_H - 10);
+
+    // pitcher
+    ctx.fillStyle = "#C3C7D6";
+    ctx.beginPath(); ctx.arc(MOUND + 40, GROUND - 44, 11, 0, Math.PI * 2); ctx.fill();
+    A.rrect(ctx, MOUND + 32, GROUND - 34, 16, 30, 6); ctx.fill();
+
+    // batter + bat
+    var sw = swingAnim > 0 ? (0.22 - swingAnim) / 0.22 : 0;
+    ctx.save();
+    ctx.translate(PLATE - 34, GROUND - 6);
+    ctx.fillStyle = "#ECEEF5";
+    ctx.beginPath(); ctx.arc(0, -62, 12, 0, Math.PI * 2); ctx.fill();
+    A.rrect(ctx, -9, -52, 18, 34, 7); ctx.fill();
+    ctx.save();
+    ctx.translate(4, -44);
+    ctx.rotate(swingAnim > 0 ? -2.2 + sw * 3.1 : -2.2);
+    ctx.fillStyle = "#D9A05B";
+    A.rrect(ctx, 0, -4, 54, 8, 4); ctx.fill();
+    ctx.restore();
+    ctx.restore();
+
+    // plate + the contact band you're aiming to meet
+    ctx.fillStyle = "#ECEEF5";
+    A.rrect(ctx, PLATE - 16, GROUND - 10, 34, 8, 3); ctx.fill();
+    if (state === "pitch") {
+      ctx.fillStyle = "rgba(242,208,107,.16)";
+      ctx.fillRect(PLATE - BARREL, CONTACT_Y - 54, BARREL * 2, 108);
+      ctx.strokeStyle = "rgba(242,208,107,.5)";
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(PLATE - BARREL, CONTACT_Y - 54, BARREL * 2, 108);
+    }
+
+    // ball
+    if (ball) {
+      ctx.fillStyle = "#FFFFFF";
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, state === "hit" ? 8 : 9, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = "#C2245A";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, 5.5, -0.9, 0.9); ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // live distance readout while the ball is up
+    if (state === "hit" && ball) {
+      var feet = Math.max(0, Math.round((ball.x - PLATE) * FT_PER_PX));
+      ctx.fillStyle = "rgba(255,255,255,.9)";
+      ctx.font = "800 30px 'Bricolage Grotesque', ui-sans-serif, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(feet + " ft", W / 2, 54);
+    }
+
+    if (msgT > 0 && resultText) {
+      ctx.globalAlpha = Math.min(1, msgT);
+      ctx.fillStyle = resultColor;
+      ctx.font = "800 34px 'Bricolage Grotesque', ui-sans-serif, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(resultText, W / 2, 86);
+      ctx.globalAlpha = 1;
+    }
+
+    if (state === "pitch") {
+      ctx.fillStyle = "rgba(255,255,255,.55)";
+      ctx.font = "600 14px ui-sans-serif, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("click to swing", W / 2, H - 18);
+    }
+  }
+
+  canvas.addEventListener("mousedown", function (e) {
+    if (e.button !== 0) return;      // left button only, as asked
+    e.preventDefault();
+    swing();
+  });
+  canvas.addEventListener("touchstart", function (e) { e.preventDefault(); swing(); }, { passive: false });
+  canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+
+  ov.onClick("[data-act]", function () {
+    newGame();
+    running = true;
+    ov.hide();
+  });
+
+  newGame();
+  running = false;
+  ov.show("<h2>Home Run Derby</h2><p>You get ten outs. Swing as the ball reaches the plate — " +
+    "the lit box shows the sweet spot. Pitches you let go by are free.</p>" +
+    '<button class="btn go" data-act="start">Play ball</button>' +
+    '<div class="keys">Left click to swing<br>Clean contact leaves the yard · mistimed contact gets caught</div>');
+
+  A.loop(function (dt) {
+    if (running) update(dt);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>

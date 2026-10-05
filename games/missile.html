@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Missile — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Missile</div>
+    <div class="stats">
+      <div class="stat"><small>Score</small><b id="score">0</b></div>
+      <div class="stat"><small>Wave</small><b id="wave">1</b></div>
+      <div class="stat"><small>Cities</small><b id="cities">6</b></div>
+      <div class="stat"><small>Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+  <p class="hint">Click anywhere to fire an interceptor. It explodes where you clicked — the blast takes out any missile it touches.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var W = 800, H = 540;
+  var GROUND = H - 48;
+  var canvas = document.getElementById("c");
+  var ctx = A.fit(canvas, W, H);
+  var ov = A.overlay(document.getElementById("ov"));
+  var el = {
+    score: document.getElementById("score"), wave: document.getElementById("wave"),
+    cities: document.getElementById("cities"), best: document.getElementById("best")
+  };
+
+  var cities, enemies, friendly, blasts, score, wave, running, ammo, spawnLeft, spawnTimer, betweenWaves;
+  var BASE = { x: W / 2, y: GROUND };
+
+  function newGame() {
+    score = 0; wave = 1;
+    cities = [];
+    var spots = [90, 170, 250, 550, 630, 710];
+    spots.forEach(function (x) { cities.push({ x: x, alive: true }); });
+    startWave();
+    sync();
+  }
+
+  function startWave() {
+    enemies = []; friendly = []; blasts = [];
+    ammo = 12 + Math.min(wave, 6);
+    spawnLeft = 5 + wave * 2;
+    spawnTimer = 0.6;
+    betweenWaves = false;
+  }
+
+  function sync() {
+    el.score.textContent = score;
+    el.wave.textContent = wave;
+    el.cities.textContent = cities.filter(function (c) { return c.alive; }).length;
+    el.best.textContent = A.best("missile");
+  }
+
+  function spawnEnemy() {
+    var live = cities.filter(function (c) { return c.alive; });
+    var targets = live.length ? live.map(function (c) { return c.x; }) : [BASE.x];
+    var tx = targets[A.rndInt(0, targets.length - 1)] + A.rnd(-18, 18);
+    var sx = A.rnd(20, W - 20);
+    // speed climbs with the wave but is capped so late waves stay reactable
+    var sp = Math.min(44 + wave * 7, 120);
+    var dx = tx - sx, dy = GROUND - 0;
+    var len = Math.sqrt(dx * dx + dy * dy);
+    enemies.push({
+      x: sx, y: 0, sx: sx, sy: 0, tx: tx,
+      vx: dx / len * sp, vy: dy / len * sp
+    });
+  }
+
+  function fireAt(mx, my) {
+    if (!running || betweenWaves) return;
+    if (ammo <= 0) return;
+    if (my > GROUND - 6) my = GROUND - 6;
+    ammo--;
+    var dx = mx - BASE.x, dy = my - BASE.y;
+    var len = Math.sqrt(dx * dx + dy * dy) || 1;
+    var sp = 460;
+    friendly.push({
+      x: BASE.x, y: BASE.y, sx: BASE.x, sy: BASE.y,
+      tx: mx, ty: my, vx: dx / len * sp, vy: dy / len * sp
+    });
+  }
+
+  function boom(x, y, friendlyBlast) {
+    blasts.push({ x: x, y: y, r: 0, max: friendlyBlast ? 58 : 34, grow: 150, state: 1 });
+  }
+
+  function update(dt) {
+    var i, j;
+
+    if (!betweenWaves) {
+      spawnTimer -= dt;
+      if (spawnTimer <= 0 && spawnLeft > 0) {
+        spawnEnemy();
+        spawnLeft--;
+        spawnTimer = Math.max(0.35, 1.5 - wave * 0.07);
+      }
+    }
+
+    for (i = friendly.length - 1; i >= 0; i--) {
+      var f = friendly[i];
+      f.x += f.vx * dt; f.y += f.vy * dt;
+      if (A.dist(f.x, f.y, f.sx, f.sy) >= A.dist(f.tx, f.ty, f.sx, f.sy)) {
+        boom(f.tx, f.ty, true);
+        friendly.splice(i, 1);
+      }
+    }
+
+    for (i = enemies.length - 1; i >= 0; i--) {
+      var e = enemies[i];
+      e.x += e.vx * dt; e.y += e.vy * dt;
+      if (e.y >= GROUND) {
+        boom(e.x, GROUND, false);
+        enemies.splice(i, 1);
+        // flatten the nearest standing city
+        var best = null, bd = 1e9;
+        cities.forEach(function (c) {
+          if (!c.alive) return;
+          var d = Math.abs(c.x - e.x);
+          if (d < bd) { bd = d; best = c; }
+        });
+        if (best && bd < 44) { best.alive = false; sync(); }
+        continue;
+      }
+      for (j = 0; j < blasts.length; j++) {
+        var bl = blasts[j];
+        if (A.dist(e.x, e.y, bl.x, bl.y) < bl.r) {
+          boom(e.x, e.y, false);
+          enemies.splice(i, 1);
+          score += 25 * wave;
+          sync();
+          break;
+        }
+      }
+    }
+
+    for (i = blasts.length - 1; i >= 0; i--) {
+      var b = blasts[i];
+      if (b.state === 1) {
+        b.r += b.grow * dt;
+        if (b.r >= b.max) b.state = -1;
+      } else {
+        b.r -= b.grow * 0.8 * dt;
+        if (b.r <= 0) blasts.splice(i, 1);
+      }
+    }
+
+    if (!betweenWaves && spawnLeft === 0 && enemies.length === 0 && friendly.length === 0 && blasts.length === 0) {
+      betweenWaves = true;
+      var alive = cities.filter(function (c) { return c.alive; }).length;
+      if (alive === 0) return gameOver();
+      score += alive * 50 + ammo * 10;
+      sync();
+      running = false;
+      ov.show("<h2>Wave " + wave + " cleared</h2><p>+" + (alive * 50) + " for surviving cities, +" +
+        (ammo * 10) + " for unused missiles.</p>" +
+        '<button class="btn go" data-act="next">Next wave</button>');
+    }
+  }
+
+  function gameOver() {
+    running = false;
+    var b = A.best("missile", score);
+    el.best.textContent = b;
+    ov.show("<h2>All cities lost</h2><p>Final score <b>" + score + "</b>" +
+      (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+      '<button class="btn go" data-act="restart">Play again</button>' +
+      '<a class="btn" href="../index.html">All games</a>');
+  }
+
+  function draw() {
+    var sky = ctx.createLinearGradient(0, 0, 0, GROUND);
+    sky.addColorStop(0, "#0E1120");
+    sky.addColorStop(1, "#1E2742");
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.strokeStyle = "rgba(255,138,125,.55)";
+    ctx.lineWidth = 1.6;
+    enemies.forEach(function (e) {
+      ctx.beginPath(); ctx.moveTo(e.sx, e.sy); ctx.lineTo(e.x, e.y); ctx.stroke();
+      ctx.fillStyle = "#FF8A7D";
+      ctx.beginPath(); ctx.arc(e.x, e.y, 3, 0, Math.PI * 2); ctx.fill();
+    });
+
+    ctx.strokeStyle = "rgba(91,200,232,.75)";
+    friendly.forEach(function (f) {
+      ctx.beginPath(); ctx.moveTo(f.sx, f.sy); ctx.lineTo(f.x, f.y); ctx.stroke();
+      ctx.fillStyle = "#5BC8E8";
+      ctx.beginPath(); ctx.arc(f.x, f.y, 3, 0, Math.PI * 2); ctx.fill();
+    });
+
+    blasts.forEach(function (b) {
+      var g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, Math.max(b.r, 1));
+      g.addColorStop(0, "rgba(255,255,255,.95)");
+      g.addColorStop(0.55, "rgba(245,161,91,.8)");
+      g.addColorStop(1, "rgba(255,107,107,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(b.x, b.y, Math.max(b.r, 0), 0, Math.PI * 2); ctx.fill();
+    });
+
+    ctx.fillStyle = "#2B2F42";
+    ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = "#3C4360";
+    ctx.fillRect(0, GROUND, W, 4);
+
+    cities.forEach(function (c) {
+      if (c.alive) {
+        ctx.fillStyle = "#4CC98A";
+        A.rrect(ctx, c.x - 20, GROUND - 22, 40, 22, 4); ctx.fill();
+        ctx.fillStyle = "#12141F";
+        for (var i = 0; i < 3; i++) ctx.fillRect(c.x - 13 + i * 10, GROUND - 16, 5, 7);
+      } else {
+        ctx.fillStyle = "#3C4360";
+        A.rrect(ctx, c.x - 18, GROUND - 7, 36, 7, 3); ctx.fill();
+      }
+    });
+
+    // launcher
+    ctx.fillStyle = "#ECEEF5";
+    ctx.beginPath();
+    ctx.moveTo(BASE.x - 22, GROUND); ctx.lineTo(BASE.x, GROUND - 26); ctx.lineTo(BASE.x + 22, GROUND);
+    ctx.closePath(); ctx.fill();
+
+    // ammo readout
+    ctx.fillStyle = ammo > 3 ? "rgba(255,255,255,.85)" : "#FF8A7D";
+    ctx.font = "700 14px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("MISSILES " + ammo, BASE.x, GROUND - 34);
+  }
+
+  function pointAt(e) {
+    var r = canvas.getBoundingClientRect();
+    var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    var cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
+    fireAt(cx * (W / r.width), cy * (H / r.height));
+  }
+  canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); pointAt(e); });
+
+  ov.onClick("[data-act]", function (b) {
+    var act = b.getAttribute("data-act");
+    if (act === "restart" || act === "start") newGame();
+    if (act === "next") { wave++; startWave(); sync(); }
+    running = true;
+    ov.hide();
+  });
+
+  newGame();
+  running = false;
+  ov.show("<h2>Missile</h2><p>Incoming missiles are falling on your cities. Click to detonate an interceptor in their path.</p>" +
+    '<button class="btn go" data-act="start">Start</button>' +
+    '<div class="keys">Click or tap anywhere to fire · you have limited missiles each wave</div>');
+
+  A.loop(function (dt) {
+    if (running) update(dt);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>

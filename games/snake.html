@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Snake — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Snake</div>
+    <div class="stats">
+      <div class="stat"><small>Score</small><b id="score">0</b></div>
+      <div class="stat"><small>Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+
+  <div class="touch">
+    <button data-key="ArrowLeft">←</button>
+    <button data-key="ArrowUp">↑</button>
+    <button data-key="ArrowDown">↓</button>
+    <button data-key="ArrowRight">→</button>
+  </div>
+  <p class="hint">Eat the apples. Don't hit the walls or yourself.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var COLS = 24, ROWS = 18, CELL = 26;
+  var ctx = A.fit(document.getElementById("c"), COLS * CELL, ROWS * CELL);
+  var k = A.keys();
+  var ov = A.overlay(document.getElementById("ov"));
+  var scoreEl = document.getElementById("score"), bestEl = document.getElementById("best");
+  A.touchKeys(document.querySelector(".touch"), k);
+
+  var snake, dir, nextDir, apple, score, alive, stepTime, acc, started;
+
+  function reset() {
+    snake = [{ x: 8, y: 9 }, { x: 7, y: 9 }, { x: 6, y: 9 }];
+    dir = { x: 1, y: 0 };
+    nextDir = { x: 1, y: 0 };
+    score = 0; alive = true; acc = 0; stepTime = 0.14;
+    placeApple();
+    scoreEl.textContent = "0";
+    bestEl.textContent = A.best("snake");
+  }
+
+  function placeApple() {
+    var tries = 0;
+    do {
+      apple = { x: A.rndInt(0, COLS - 1), y: A.rndInt(0, ROWS - 1) };
+      tries++;
+    } while (tries < 500 && snake.some(function (s) { return s.x === apple.x && s.y === apple.y; }));
+  }
+
+  function readInput() {
+    // can't reverse straight back into yourself
+    if (k.any("ArrowLeft", "a", "A") && dir.x !== 1) nextDir = { x: -1, y: 0 };
+    else if (k.any("ArrowRight", "d", "D") && dir.x !== -1) nextDir = { x: 1, y: 0 };
+    else if (k.any("ArrowUp", "w", "W") && dir.y !== 1) nextDir = { x: 0, y: -1 };
+    else if (k.any("ArrowDown", "s", "S") && dir.y !== -1) nextDir = { x: 0, y: 1 };
+  }
+
+  function step() {
+    dir = nextDir;
+    var head = { x: snake[0].x + dir.x, y: snake[0].y + dir.y };
+
+    if (head.x < 0 || head.y < 0 || head.x >= COLS || head.y >= ROWS) return die();
+    for (var i = 0; i < snake.length - 1; i++) {
+      if (snake[i].x === head.x && snake[i].y === head.y) return die();
+    }
+
+    snake.unshift(head);
+    if (head.x === apple.x && head.y === apple.y) {
+      score++;
+      scoreEl.textContent = score;
+      placeApple();
+      // speeds up gently, then levels off so it stays playable
+      stepTime = Math.max(0.065, 0.14 - score * 0.0035);
+    } else {
+      snake.pop();
+    }
+  }
+
+  function die() {
+    alive = false;
+    var b = A.best("snake", score);
+    bestEl.textContent = b;
+    ov.show(
+      "<h2>Game over</h2><p>You scored <b>" + score + "</b>" +
+      (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+      '<button class="btn go" data-act="again">Play again</button>' +
+      '<a class="btn" href="../index.html">All games</a>'
+    );
+  }
+
+  function draw() {
+    ctx.fillStyle = "#161926";
+    ctx.fillRect(0, 0, ctx.W, ctx.H);
+
+    // subtle grid
+    ctx.strokeStyle = "rgba(255,255,255,.035)";
+    ctx.lineWidth = 1;
+    for (var x = 1; x < COLS; x++) {
+      ctx.beginPath(); ctx.moveTo(x * CELL, 0); ctx.lineTo(x * CELL, ctx.H); ctx.stroke();
+    }
+    for (var y = 1; y < ROWS; y++) {
+      ctx.beginPath(); ctx.moveTo(0, y * CELL); ctx.lineTo(ctx.W, y * CELL); ctx.stroke();
+    }
+
+    // apple
+    ctx.fillStyle = "#FF6B6B";
+    A.rrect(ctx, apple.x * CELL + 5, apple.y * CELL + 5, CELL - 10, CELL - 10, 7);
+    ctx.fill();
+
+    // snake, brightest at the head
+    for (var i = snake.length - 1; i >= 0; i--) {
+      var t = 1 - i / (snake.length + 4);
+      ctx.fillStyle = i === 0 ? "#7CF0B4" : "rgba(76,201,138," + (0.35 + t * 0.6).toFixed(3) + ")";
+      A.rrect(ctx, snake[i].x * CELL + 2.5, snake[i].y * CELL + 2.5, CELL - 5, CELL - 5, 7);
+      ctx.fill();
+    }
+  }
+
+  function startScreen() {
+    ov.show(
+      "<h2>Snake</h2><p>Eat apples to grow. Hitting a wall or your own tail ends the run.</p>" +
+      '<button class="btn go" data-act="again">Start</button>' +
+      '<div class="keys"><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd> or <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to steer</div>'
+    );
+  }
+
+  ov.onClick("[data-act=again]", function () {
+    reset();
+    started = true;
+    ov.hide();
+  });
+
+  reset();
+  started = false;
+  startScreen();
+
+  A.loop(function (dt) {
+    if (started && alive) {
+      readInput();
+      acc += dt;
+      while (acc >= stepTime) { acc -= stepTime; if (alive) step(); }
+    }
+    draw();
+  });
+})();
+</script>
+</body>
+</html>

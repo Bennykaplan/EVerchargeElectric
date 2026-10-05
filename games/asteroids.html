@@ -1,0 +1,293 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Asteroids — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Asteroids</div>
+    <div class="stats">
+      <div class="stat"><small>Score</small><b id="score">0</b></div>
+      <div class="stat"><small>Wave</small><b id="wave">1</b></div>
+      <div class="stat"><small>Ships</small><b id="lives">3</b></div>
+      <div class="stat"><small>Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+
+  <div class="touch">
+    <button data-key="ArrowLeft">↺</button>
+    <button data-key="ArrowUp">▲</button>
+    <button data-key="ArrowRight">↻</button>
+    <button class="wide" data-key=" ">Fire</button>
+  </div>
+  <p class="hint">Turn, thrust, shoot. Big rocks split into smaller ones.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var W = 760, H = 540;
+  var ctx = A.fit(document.getElementById("c"), W, H);
+  var k = A.keys();
+  var ov = A.overlay(document.getElementById("ov"));
+  var el = {
+    score: document.getElementById("score"), wave: document.getElementById("wave"),
+    lives: document.getElementById("lives"), best: document.getElementById("best")
+  };
+  A.touchKeys(document.querySelector(".touch"), k);
+
+  var ship, rocks, bullets, bits, score, lives, wave, running, invuln, cool;
+
+  function wrap(o) {
+    if (o.x < 0) o.x += W; else if (o.x > W) o.x -= W;
+    if (o.y < 0) o.y += H; else if (o.y > H) o.y -= H;
+  }
+
+  function makeRock(x, y, size) {
+    var pts = [], n = A.rndInt(9, 13);
+    for (var i = 0; i < n; i++) pts.push(A.rnd(0.72, 1.22));
+    var sp = (3 - size) * 22 + A.rnd(16, 42) + wave * 3;
+    var ang = A.rnd(0, Math.PI * 2);
+    return {
+      x: x, y: y, size: size, r: size * 17,
+      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
+      rot: A.rnd(0, Math.PI * 2), spin: A.rnd(-1.1, 1.1), pts: pts
+    };
+  }
+
+  function spawnWave() {
+    rocks = [];
+    var n = Math.min(3 + wave, 9);
+    for (var i = 0; i < n; i++) {
+      // never spawn right on top of the ship
+      var x, y, guard = 0;
+      do {
+        x = A.rnd(0, W); y = A.rnd(0, H); guard++;
+      } while (guard < 200 && A.dist(x, y, W / 2, H / 2) < 150);
+      rocks.push(makeRock(x, y, 3));
+    }
+  }
+
+  function resetShip() {
+    ship = { x: W / 2, y: H / 2, vx: 0, vy: 0, a: -Math.PI / 2 };
+    invuln = 2.2;
+  }
+
+  function newGame() {
+    score = 0; lives = 3; wave = 1; bullets = []; bits = []; cool = 0;
+    resetShip();
+    spawnWave();
+    sync();
+  }
+
+  function sync() {
+    el.score.textContent = score;
+    el.wave.textContent = wave;
+    el.lives.textContent = lives;
+    el.best.textContent = A.best("asteroids");
+  }
+
+  function burst(x, y, n, color) {
+    for (var i = 0; i < n; i++) {
+      var a = A.rnd(0, Math.PI * 2), s = A.rnd(40, 200);
+      bits.push({ x: x, y: y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: A.rnd(0.3, 0.8), c: color });
+    }
+  }
+
+  function shoot() {
+    if (cool > 0 || bullets.length >= 5) return;
+    cool = 0.22;
+    bullets.push({
+      x: ship.x + Math.cos(ship.a) * 16,
+      y: ship.y + Math.sin(ship.a) * 16,
+      vx: Math.cos(ship.a) * 520 + ship.vx,
+      vy: Math.sin(ship.a) * 520 + ship.vy,
+      life: 1.15
+    });
+  }
+
+  function hitShip() {
+    if (invuln > 0) return;
+    burst(ship.x, ship.y, 26, "#FF8A7D");
+    lives--;
+    sync();
+    if (lives <= 0) return gameOver();
+    resetShip();
+  }
+
+  function gameOver() {
+    running = false;
+    var b = A.best("asteroids", score);
+    el.best.textContent = b;
+    ov.show("<h2>Ship lost</h2><p>Final score <b>" + score + "</b>" +
+      (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+      '<button class="btn go" data-act="restart">Play again</button>' +
+      '<a class="btn" href="../index.html">All games</a>');
+  }
+
+  function update(dt) {
+    cool -= dt;
+    if (invuln > 0) invuln -= dt;
+
+    if (k.any("ArrowLeft", "a", "A")) ship.a -= 3.4 * dt;
+    if (k.any("ArrowRight", "d", "D")) ship.a += 3.4 * dt;
+    var thrusting = k.any("ArrowUp", "w", "W");
+    if (thrusting) {
+      ship.vx += Math.cos(ship.a) * 420 * dt;
+      ship.vy += Math.sin(ship.a) * 420 * dt;
+    }
+    if (k.any(" ")) shoot();
+
+    var drag = Math.pow(0.55, dt);
+    ship.vx *= drag; ship.vy *= drag;
+    var sp = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy);
+    if (sp > 360) { ship.vx = ship.vx / sp * 360; ship.vy = ship.vy / sp * 360; }
+    ship.x += ship.vx * dt; ship.y += ship.vy * dt;
+    wrap(ship);
+    ship.thrust = thrusting;
+
+    var i, j;
+    for (i = bullets.length - 1; i >= 0; i--) {
+      var b = bullets[i];
+      b.x += b.vx * dt; b.y += b.vy * dt; b.life -= dt;
+      wrap(b);
+      if (b.life <= 0) bullets.splice(i, 1);
+    }
+
+    for (i = rocks.length - 1; i >= 0; i--) {
+      var r = rocks[i];
+      r.x += r.vx * dt; r.y += r.vy * dt; r.rot += r.spin * dt;
+      wrap(r);
+
+      for (j = bullets.length - 1; j >= 0; j--) {
+        if (A.dist(r.x, r.y, bullets[j].x, bullets[j].y) < r.r) {
+          bullets.splice(j, 1);
+          burst(r.x, r.y, 12, "#C3C7D6");
+          score += (4 - r.size) * 25;
+          if (r.size > 1) {
+            rocks.push(makeRock(r.x, r.y, r.size - 1));
+            rocks.push(makeRock(r.x, r.y, r.size - 1));
+          }
+          rocks.splice(i, 1);
+          sync();
+          break;
+        }
+      }
+      if (!rocks[i]) continue;
+      if (invuln <= 0 && A.dist(r.x, r.y, ship.x, ship.y) < r.r + 11) { hitShip(); return; }
+    }
+
+    for (i = bits.length - 1; i >= 0; i--) {
+      var p = bits[i];
+      p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt;
+      p.vx *= 0.97; p.vy *= 0.97;
+      if (p.life <= 0) bits.splice(i, 1);
+    }
+
+    if (rocks.length === 0) {
+      wave++;
+      score += 100;
+      sync();
+      spawnWave();
+      invuln = Math.max(invuln, 1.4);
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = "#101320";
+    ctx.fillRect(0, 0, W, H);
+
+    // starfield
+    ctx.fillStyle = "rgba(255,255,255,.18)";
+    for (var s = 0; s < 70; s++) {
+      var sx = (s * 7919) % W, sy = (s * 104729) % H;
+      ctx.fillRect(sx, sy, 1.6, 1.6);
+    }
+
+    ctx.strokeStyle = "#C3C7D6";
+    ctx.lineWidth = 2;
+    rocks.forEach(function (r) {
+      ctx.save();
+      ctx.translate(r.x, r.y);
+      ctx.rotate(r.rot);
+      ctx.beginPath();
+      for (var i = 0; i < r.pts.length; i++) {
+        var a = (i / r.pts.length) * Math.PI * 2;
+        var rad = r.r * r.pts[i];
+        var px = Math.cos(a) * rad, py = Math.sin(a) * rad;
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    bits.forEach(function (p) {
+      ctx.globalAlpha = Math.max(0, p.life);
+      ctx.fillStyle = p.c;
+      ctx.fillRect(p.x - 1.5, p.y - 1.5, 3, 3);
+    });
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#5BC8E8";
+    bullets.forEach(function (b) {
+      ctx.beginPath(); ctx.arc(b.x, b.y, 2.6, 0, Math.PI * 2); ctx.fill();
+    });
+
+    if (lives > 0) {
+      ctx.save();
+      ctx.translate(ship.x, ship.y);
+      ctx.rotate(ship.a);
+      ctx.globalAlpha = invuln > 0 ? (Math.sin(invuln * 22) > 0 ? 0.35 : 1) : 1;
+      if (ship.thrust) {
+        ctx.fillStyle = "#F5A15B";
+        ctx.beginPath();
+        ctx.moveTo(-10, -5); ctx.lineTo(-10 - A.rnd(7, 15), 0); ctx.lineTo(-10, 5);
+        ctx.closePath(); ctx.fill();
+      }
+      ctx.strokeStyle = "#ECEEF5";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(16, 0); ctx.lineTo(-11, -10); ctx.lineTo(-6, 0); ctx.lineTo(-11, 10);
+      ctx.closePath();
+      ctx.stroke();
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    }
+  }
+
+  ov.onClick("[data-act]", function () {
+    newGame();
+    running = true;
+    ov.hide();
+  });
+
+  newGame();
+  running = false;
+  ov.show("<h2>Asteroids</h2><p>Break the rocks apart without flying into one. Each rock splits twice.</p>" +
+    '<button class="btn go" data-act="start">Start</button>' +
+    '<div class="keys"><kbd>←</kbd> <kbd>→</kbd> turn · <kbd>↑</kbd> thrust · <kbd>Space</kbd> fire<br>You wrap around the edges of the screen</div>');
+
+  A.loop(function (dt) {
+    if (running) update(dt);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>

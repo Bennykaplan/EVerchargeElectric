@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Breakout — EverCharge Arcade</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&display=swap">
+<link rel="stylesheet" href="../style.css">
+</head>
+<body>
+<main class="wrap">
+  <div class="bar">
+    <a class="back" href="../index.html">← All games</a>
+    <div class="title">Breakout</div>
+    <div class="stats">
+      <div class="stat"><small>Score</small><b id="score">0</b></div>
+      <div class="stat"><small>Level</small><b id="level">1</b></div>
+      <div class="stat"><small>Lives</small><b id="lives">3</b></div>
+      <div class="stat"><small>Best</small><b id="best">0</b></div>
+    </div>
+  </div>
+
+  <div class="stage">
+    <canvas id="c"></canvas>
+    <div class="overlay" id="ov"></div>
+  </div>
+
+  <div class="touch">
+    <button data-key="ArrowLeft">←</button>
+    <button class="wide" data-key=" ">Launch</button>
+    <button data-key="ArrowRight">→</button>
+  </div>
+  <p class="hint">Clear every brick. The ball speeds up as you go.</p>
+</main>
+
+<script src="../arcade.js"></script>
+<script>
+(function () {
+  "use strict";
+  var A = window.Arcade;
+  var W = 720, H = 520;
+  var ctx = A.fit(document.getElementById("c"), W, H);
+  var k = A.keys();
+  var ov = A.overlay(document.getElementById("ov"));
+  var el = {
+    score: document.getElementById("score"), level: document.getElementById("level"),
+    lives: document.getElementById("lives"), best: document.getElementById("best")
+  };
+  var stage = document.querySelector(".stage");
+  A.touchKeys(document.querySelector(".touch"), k);
+
+  var COLORS = ["#FF6B6B", "#F5A15B", "#F2D06B", "#4CC98A", "#5BC8E8", "#9B8CF0"];
+  var PAD_W = 110, PAD_H = 14, BALL_R = 8;
+
+  var paddle, ball, bricks, score, lives, level, stuck, running, pointerX = null;
+
+  function makeBricks(lv) {
+    var rows = Math.min(4 + lv, 7), cols = 10;
+    var pad = 8, left = 42, top = 64;
+    var bw = (W - left * 2 - pad * (cols - 1)) / cols, bh = 24;
+    var out = [];
+    for (var r = 0; r < rows; r++) {
+      for (var c = 0; c < cols; c++) {
+        // a few tougher bricks appear from level 3
+        var hp = (lv >= 3 && r === 0) ? 2 : 1;
+        out.push({
+          x: left + c * (bw + pad), y: top + r * (bh + pad),
+          w: bw, h: bh, hp: hp, c: COLORS[r % COLORS.length]
+        });
+      }
+    }
+    return out;
+  }
+
+  function resetBall() {
+    stuck = true;
+    ball = { x: paddle.x + PAD_W / 2, y: H - 46 - BALL_R, vx: 0, vy: 0 };
+  }
+
+  function launch() {
+    if (!stuck) return;
+    stuck = false;
+    var speed = 300 + (level - 1) * 26;
+    var ang = A.rnd(-0.6, 0.6) - Math.PI / 2;
+    ball.vx = Math.cos(ang) * speed;
+    ball.vy = Math.sin(ang) * speed;
+  }
+
+  function newGame() {
+    score = 0; lives = 3; level = 1;
+    paddle = { x: (W - PAD_W) / 2 };
+    bricks = makeBricks(level);
+    resetBall();
+    sync();
+    running = true;
+  }
+
+  function nextLevel() {
+    level++;
+    paddle.x = (W - PAD_W) / 2;
+    bricks = makeBricks(level);
+    resetBall();
+    sync();
+    ov.show("<h2>Level " + level + "</h2><p>Nice. The ball comes back a little faster.</p>" +
+      '<button class="btn go" data-act="go">Continue</button>');
+    running = false;
+  }
+
+  function sync() {
+    el.score.textContent = score;
+    el.level.textContent = level;
+    el.lives.textContent = lives;
+    el.best.textContent = A.best("breakout");
+  }
+
+  function gameOver(won) {
+    running = false;
+    var b = A.best("breakout", score);
+    el.best.textContent = b;
+    ov.show("<h2>" + (won ? "You cleared it!" : "Game over") + "</h2>" +
+      "<p>Final score <b>" + score + "</b>" + (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+      '<button class="btn go" data-act="restart">Play again</button>' +
+      '<a class="btn" href="../index.html">All games</a>');
+  }
+
+  function update(dt) {
+    // paddle
+    var speed = 540;
+    if (pointerX !== null) {
+      paddle.x = A.clamp(pointerX - PAD_W / 2, 0, W - PAD_W);
+    } else {
+      if (k.any("ArrowLeft", "a", "A")) paddle.x -= speed * dt;
+      if (k.any("ArrowRight", "d", "D")) paddle.x += speed * dt;
+      paddle.x = A.clamp(paddle.x, 0, W - PAD_W);
+    }
+
+    if (k.any(" ", "Enter")) launch();
+
+    if (stuck) {
+      ball.x = paddle.x + PAD_W / 2;
+      ball.y = H - 46 - BALL_R;
+      return;
+    }
+
+    // step in slices so a fast ball can't tunnel through a brick
+    var steps = Math.ceil(Math.max(Math.abs(ball.vx), Math.abs(ball.vy)) * dt / 6) || 1;
+    var sdt = dt / steps;
+    for (var s = 0; s < steps; s++) {
+      ball.x += ball.vx * sdt;
+      ball.y += ball.vy * sdt;
+
+      if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
+      if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
+      if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
+
+      // paddle
+      var py = H - 46;
+      if (ball.vy > 0 && ball.y + BALL_R >= py && ball.y - BALL_R <= py + PAD_H &&
+          ball.x >= paddle.x - BALL_R && ball.x <= paddle.x + PAD_W + BALL_R) {
+        ball.y = py - BALL_R;
+        var hit = (ball.x - (paddle.x + PAD_W / 2)) / (PAD_W / 2); // -1..1
+        hit = A.clamp(hit, -1, 1);
+        var sp = Math.min(Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy) * 1.015, 640);
+        var ang = -Math.PI / 2 + hit * 1.05;
+        ball.vx = Math.cos(ang) * sp;
+        ball.vy = Math.sin(ang) * sp;
+      }
+
+      // bricks
+      for (var i = 0; i < bricks.length; i++) {
+        var b = bricks[i];
+        if (ball.x + BALL_R < b.x || ball.x - BALL_R > b.x + b.w ||
+            ball.y + BALL_R < b.y || ball.y - BALL_R > b.y + b.h) continue;
+
+        // bounce off whichever side we were least overlapping
+        var ox = Math.min(ball.x + BALL_R - b.x, b.x + b.w - (ball.x - BALL_R));
+        var oy = Math.min(ball.y + BALL_R - b.y, b.y + b.h - (ball.y - BALL_R));
+        if (ox < oy) ball.vx = -ball.vx; else ball.vy = -ball.vy;
+
+        b.hp--;
+        if (b.hp <= 0) { bricks.splice(i, 1); score += 10 * level; }
+        else score += 4 * level;
+        sync();
+        break;
+      }
+
+      if (bricks.length === 0) { nextLevel(); return; }
+
+      if (ball.y - BALL_R > H) {
+        lives--;
+        sync();
+        if (lives <= 0) { gameOver(false); return; }
+        paddle.x = (W - PAD_W) / 2;
+        resetBall();
+        return;
+      }
+    }
+  }
+
+  function draw() {
+    ctx.fillStyle = "#161926";
+    ctx.fillRect(0, 0, W, H);
+
+    for (var i = 0; i < bricks.length; i++) {
+      var b = bricks[i];
+      ctx.globalAlpha = b.hp > 1 ? 1 : 0.85;
+      ctx.fillStyle = b.c;
+      A.rrect(ctx, b.x, b.y, b.w, b.h, 6);
+      ctx.fill();
+      if (b.hp > 1) {
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = "rgba(255,255,255,.75)";
+        ctx.lineWidth = 2;
+        A.rrect(ctx, b.x + 3, b.y + 3, b.w - 6, b.h - 6, 4);
+        ctx.stroke();
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    ctx.fillStyle = "#ECEEF5";
+    A.rrect(ctx, paddle.x, H - 46, PAD_W, PAD_H, 7);
+    ctx.fill();
+
+    ctx.fillStyle = "#5BC8E8";
+    ctx.beginPath();
+    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
+    ctx.fill();
+
+    if (stuck && running) {
+      ctx.fillStyle = "rgba(255,255,255,.6)";
+      ctx.font = "600 15px ui-sans-serif, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Press Space to launch", W / 2, H - 76);
+    }
+  }
+
+  // mouse / touch steering
+  function pointerMove(e) {
+    var r = stage.getBoundingClientRect();
+    var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
+    pointerX = cx * (W / r.width);
+  }
+  stage.addEventListener("mousemove", pointerMove);
+  stage.addEventListener("mouseleave", function () { pointerX = null; });
+  stage.addEventListener("touchmove", function (e) { e.preventDefault(); pointerMove(e); }, { passive: false });
+  stage.addEventListener("click", function () { launch(); });
+  window.addEventListener("keydown", function () { pointerX = null; });
+
+  ov.onClick("[data-act]", function (b) {
+    var act = b.getAttribute("data-act");
+    if (act === "restart" || act === "start") newGame();
+    running = true;
+    ov.hide();
+  });
+
+  newGame();
+  running = false;
+  ov.show("<h2>Breakout</h2><p>Knock out every brick. You get three lives.</p>" +
+    '<button class="btn go" data-act="start">Start</button>' +
+    '<div class="keys"><kbd>←</kbd> <kbd>→</kbd> or move the mouse to steer · <kbd>Space</kbd> to launch</div>');
+
+  A.loop(function (dt) {
+    if (running) update(dt);
+    draw();
+  });
+})();
+</script>
+</body>
+</html>
