@@ -13,9 +13,10 @@
 <main class="wrap">
   <div class="bar">
     <a class="back" href="../index.html">← All games</a>
-    <div class="title">Home Run Derby</div>
+    <div class="title">Home Run Derby <span id="modeTag" class="tag-inline"></span></div>
     <div class="stats">
-      <div class="stat"><small>Home runs</small><b id="hr">0</b></div>
+      <div class="stat"><small id="hrLabel">Home runs</small><b id="hr">0</b></div>
+      <div class="stat" id="skillWrap" hidden><small>Batter</small><b id="skill">1</b></div>
       <div class="stat"><small>Longest</small><b id="far">—</b></div>
       <div class="stat"><small>Outs</small><b id="outs">0/10</b></div>
       <div class="stat"><small>Best</small><b id="best">0</b></div>
@@ -26,7 +27,7 @@
     <canvas id="c"></canvas>
     <div class="overlay" id="ov"></div>
   </div>
-  <p class="hint">Left click to swing. Time it so you connect as the ball reaches the plate. Letting a pitch go by costs you nothing.</p>
+  <p class="hint" id="hint">Left click to swing. Time it so you connect as the ball reaches the plate. Letting a pitch go by costs you nothing.</p>
 </main>
 
 <script src="../arcade.js"></script>
@@ -40,7 +41,10 @@
   var ov = A.overlay(document.getElementById("ov"));
   var el = {
     hr: document.getElementById("hr"), far: document.getElementById("far"),
-    outs: document.getElementById("outs"), best: document.getElementById("best")
+    outs: document.getElementById("outs"), best: document.getElementById("best"),
+    hrLabel: document.getElementById("hrLabel"), skill: document.getElementById("skill"),
+    skillWrap: document.getElementById("skillWrap"), modeTag: document.getElementById("modeTag"),
+    hint: document.getElementById("hint")
   };
 
   // --- field layout, in world pixels ---------------------------------------
@@ -60,8 +64,21 @@
 
   var state, ball, pitchT, pitchDur, nextIn, swingAnim, resultText, resultColor;
   var hrs, outs, longest, pitches, running, msgT;
+  var mode = "bat";            // "bat" = you hit · "pitch" = you pitch, the computer bats
+  var pitchSpeedPick = 0.5, lastPick = 0.5, aiSwing = null;
+
+  function syncLabels() {
+    var p = mode === "pitch";
+    el.modeTag.textContent = p ? "· you pitch" : "";
+    el.hrLabel.textContent = p ? "Home runs allowed" : "Home runs";
+    el.skillWrap.hidden = !p;
+    el.hint.textContent = p
+      ? "Click to pitch — click high to throw hard, low to throw slow. Changing speeds is what beats the batter. Ten outs ends it."
+      : "Left click to swing. Time it so you connect as the ball reaches the plate. Letting a pitch go by costs you nothing.";
+  }
 
   function sync() {
+    el.skill.textContent = batterTier() + 1;
     el.hr.textContent = hrs;
     el.far.textContent = longest ? longest + " ft" : "—";
     el.outs.textContent = outs + "/" + MAX_OUTS;
@@ -77,7 +94,22 @@
 
   // Pitches get a little quicker as you go, then stop getting quicker.
   function pitchTime() {
+    if (mode === "pitch") {
+      // you set the speed: click high for heat, low for junk
+      return 1.30 - pitchSpeedPick * 0.62;      // 1.30s (slow) .. 0.68s (fast)
+    }
     return Math.max(0.82, 1.28 - hrs * 0.025) + A.rnd(-0.05, 0.05);
+  }
+
+  // ---- the computer batter --------------------------------------------
+  // It swings on a timer it works out from the pitch, with an error that
+  // shrinks as it connects. Changing speeds between pitches throws it off,
+  // which is the whole strategy of pitching to it.
+  function batterTier() { return pitches < 8 ? 0 : pitches < 18 ? 1 : 2; }
+  function batterBaseErr() { return [95, 70, 50][batterTier()]; }
+  function aiTimingError() {
+    var surprise = Math.abs(pitchSpeedPick - lastPick);   // 0..1
+    return batterBaseErr() + surprise * 85;
   }
 
   function throwPitch() {
@@ -90,6 +122,13 @@
       to: { x: 20, y: CONTACT_Y + A.rnd(-14, 14) }
     };
     state = "pitch";
+    if (mode === "pitch") {
+      // it aims to meet the ball at the plate, off by its timing error
+      var err = A.rnd(-aiTimingError(), aiTimingError());
+      var travel = pitchDur * (ball.from.x - PLATE) / (ball.from.x - ball.to.x);
+      aiSwing = travel + err / 420;            // error in px converted to seconds
+      lastPick = pitchSpeedPick;               // remember it only after comparing
+    }
   }
 
   function swing() {
@@ -167,7 +206,7 @@
     ov.show("<h2>Round over</h2><p>You hit <b>" + hrs + "</b> home run" + (hrs === 1 ? "" : "s") +
       (longest ? ", longest <b>" + longest + " ft</b>" : "") +
       (hrs >= b && hrs > 0 ? " — a new best!" : "") + "</p>" +
-      '<button class="btn go" data-act="restart">Swing again</button>' +
+      '<button class="btn go" data-act="' + (mode === 'pitch' ? 'start-pitch' : 'start-bat') + '">Go again</button>' + '<button class="btn" data-act="' + (mode === 'pitch' ? 'start-bat' : 'start-pitch') + '">Try the other side</button>' +
       '<a class="btn" href="../index.html">All games</a>');
   }
 
@@ -181,6 +220,9 @@
       return;
     }
 
+    if (state === "pitch" && mode === "pitch" && aiSwing != null) {
+      if (pitchT >= aiSwing) { aiSwing = null; swing(); }
+    }
     if (state === "pitch") {
       pitchT += dt;
       var p = pitchT / pitchDur;
@@ -323,23 +365,37 @@
   canvas.addEventListener("mousedown", function (e) {
     if (e.button !== 0) return;      // left button only, as asked
     e.preventDefault();
-    swing();
+    if (mode === "bat") return swing();
+    // pitching: the height you click sets the speed, and releases the pitch
+    var r = canvas.getBoundingClientRect();
+    var y = (e.clientY - r.top) * (H / r.height);
+    pitchSpeedPick = A.clamp(1 - y / H, 0, 1);
+    if (state === "wait" || state === "result") { nextIn = 0; }
   });
   canvas.addEventListener("touchstart", function (e) { e.preventDefault(); swing(); }, { passive: false });
   canvas.addEventListener("contextmenu", function (e) { e.preventDefault(); });
 
-  ov.onClick("[data-act]", function () {
+  ov.onClick("[data-act]", function (b) {
+    var act = b.getAttribute("data-act");
+    if (act === "start-pitch") mode = "pitch";
+    else if (act === "start-bat") mode = "bat";
+    syncLabels();
     newGame();
     running = true;
     ov.hide();
   });
 
+  syncLabels();
   newGame();
   running = false;
-  ov.show("<h2>Home Run Derby</h2><p>You get ten outs. Swing as the ball reaches the plate — " +
-    "the lit box shows the sweet spot. Pitches you let go by are free.</p>" +
-    '<button class="btn go" data-act="start">Play ball</button>' +
-    '<div class="keys">Left click to swing<br>Clean contact leaves the yard · mistimed contact gets caught</div>');
+  ov.show("<h2>Home Run Derby</h2><p>Pick a side.</p>" +
+    '<button class="btn go" data-act="start-bat">You bat</button>' +
+    '<button class="btn" data-act="start-pitch">You pitch</button>' +
+    '<div class="keys"><b>You bat:</b> left click to swing as the ball reaches the plate.<br>' +
+    '<b>You pitch:</b> click to throw — high for heat, low for junk. The batter times the ball, ' +
+    'and mixing your speeds is what gets it out. Ten outs ends the round.</div>');
+
+  window.__derby = function () { return { mode: mode, hrs: hrs, outs: outs, pitches: pitches, state: state }; };
 
   A.loop(function (dt) {
     if (running) update(dt);
