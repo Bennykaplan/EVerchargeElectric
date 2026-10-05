@@ -93,9 +93,9 @@
     if (cleared < 8) return 1;
     return 2;
   }
-  function aiSlack() { return [46, 26, 10][skillTier()]; }      // how far it lets itself sag
-  function aiNoise() { return [34, 16, 5][skillTier()]; }       // aim scatter, px
-  function aiReact() { return [0.10, 0.06, 0.03][skillTier()]; } // min gap between decisions
+  function aiSlack() { return [24, 15, 8][skillTier()]; }      // how far it lets itself sag
+  function aiNoise() { return [20, 10, 4][skillTier()]; }       // aim scatter, px
+  function aiReact() { return [0.055, 0.038, 0.025][skillTier()]; } // min gap between decisions
 
   function aiThink(dt) {
     aiCool -= dt;
