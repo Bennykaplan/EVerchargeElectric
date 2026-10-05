@@ -13,12 +13,13 @@
 <main class="wrap">
   <div class="bar">
     <a class="back" href="../index.html">← All games</a>
-    <div class="title">Asteroids</div>
+    <div class="title">Asteroids <span id="modeTag" class="tag-inline"></span></div>
     <div class="stats">
-      <div class="stat"><small>Score</small><b id="score">0</b></div>
-      <div class="stat"><small>Wave</small><b id="wave">1</b></div>
-      <div class="stat"><small>Ships</small><b id="lives">3</b></div>
-      <div class="stat"><small>Best</small><b id="best">0</b></div>
+      <div class="stat"><small id="scoreLabel">Score</small><b id="score">0</b></div>
+      <div class="stat" id="waveWrap"><small>Wave</small><b id="wave">1</b></div>
+      <div class="stat" id="lifeWrap"><small>Ships</small><b id="lives">3</b></div>
+      <div class="stat" id="skillWrap" hidden><small>Pilot skill</small><b id="skill">1</b></div>
+      <div class="stat"><small id="bestLabel">Best</small><b id="best">0</b></div>
     </div>
   </div>
 
@@ -27,13 +28,13 @@
     <div class="overlay" id="ov"></div>
   </div>
 
-  <div class="touch">
+  <div class="touch" id="touch">
     <button data-key="ArrowLeft">↺</button>
     <button data-key="ArrowUp">▲</button>
     <button data-key="ArrowRight">↻</button>
     <button class="wide" data-key=" ">Fire</button>
   </div>
-  <p class="hint">Turn, thrust, shoot. Big rocks split into smaller ones.</p>
+  <p class="hint" id="hint">Turn, thrust, shoot. Big rocks split into smaller ones.</p>
 </main>
 
 <script src="../arcade.js"></script>
@@ -42,64 +43,186 @@
   "use strict";
   var A = window.Arcade;
   var W = 760, H = 540;
-  var ctx = A.fit(document.getElementById("c"), W, H);
+  var canvas = document.getElementById("c");
+  var ctx = A.fit(canvas, W, H);
   var k = A.keys();
   var ov = A.overlay(document.getElementById("ov"));
   var el = {
     score: document.getElementById("score"), wave: document.getElementById("wave"),
-    lives: document.getElementById("lives"), best: document.getElementById("best")
+    lives: document.getElementById("lives"), best: document.getElementById("best"),
+    scoreLabel: document.getElementById("scoreLabel"), bestLabel: document.getElementById("bestLabel"),
+    waveWrap: document.getElementById("waveWrap"), lifeWrap: document.getElementById("lifeWrap"),
+    skill: document.getElementById("skill"), skillWrap: document.getElementById("skillWrap"),
+    modeTag: document.getElementById("modeTag"), hint: document.getElementById("hint"),
+    touch: document.getElementById("touch")
   };
-  A.touchKeys(document.querySelector(".touch"), k);
+  A.touchKeys(el.touch, k);
 
+  var SURVIVE_TO_WIN = 18;        // rocks you get to throw before the pilot wins
+  var SEND_COOLDOWN = 0.75;       // seconds between rocks you can throw
+
+  var mode = "play";
   var ship, rocks, bullets, bits, score, lives, wave, running, invuln, cool;
+  var sent, survived, sendCool, aiCool, aiFire;
 
   function wrap(o) {
     if (o.x < 0) o.x += W; else if (o.x > W) o.x -= W;
     if (o.y < 0) o.y += H; else if (o.y > H) o.y -= H;
   }
 
-  function makeRock(x, y, size) {
+  function makeRock(x, y, size, vx, vy) {
     var pts = [], n = A.rndInt(9, 13);
     for (var i = 0; i < n; i++) pts.push(A.rnd(0.72, 1.22));
-    var sp = (3 - size) * 22 + A.rnd(16, 42) + wave * 3;
-    var ang = A.rnd(0, Math.PI * 2);
-    return {
-      x: x, y: y, size: size, r: size * 17,
-      vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp,
-      rot: A.rnd(0, Math.PI * 2), spin: A.rnd(-1.1, 1.1), pts: pts
-    };
+    if (vx === undefined) {
+      var sp = (3 - size) * 22 + A.rnd(16, 42) + wave * 3;
+      var ang = A.rnd(0, Math.PI * 2);
+      vx = Math.cos(ang) * sp; vy = Math.sin(ang) * sp;
+    }
+    return { x: x, y: y, size: size, r: size * 17, vx: vx, vy: vy,
+             rot: A.rnd(0, Math.PI * 2), spin: A.rnd(-1.1, 1.1), pts: pts };
   }
 
+  // ------------------------------------------------------------- the pilot
+  // Skill follows how many rocks you have thrown, so the ramp always runs
+  // whether or not it manages to shoot them down.
+  function skillTier() {
+    if (sent < 5) return 0;
+    if (sent < 11) return 1;
+    return 2;
+  }
+  function aiReact() { return [0.13, 0.08, 0.045][skillTier()]; }
+  function aiAimErr() { return [0.30, 0.16, 0.06][skillTier()]; }   // radians
+  function aiDanger() { return [95, 125, 160][skillTier()]; }       // how early it starts dodging
+
+  // Shortest signed angle from a to b
+  function angDiff(a, b) {
+    var d = (b - a) % (Math.PI * 2);
+    if (d > Math.PI) d -= Math.PI * 2;
+    if (d < -Math.PI) d += Math.PI * 2;
+    return d;
+  }
+
+  function aiThink(dt) {
+    aiFire = false;
+    aiCool -= dt;
+    if (aiCool > 0) return;
+    aiCool = aiReact();
+
+    if (!rocks.length) return;
+
+    // the rock that is closest right now, and the one closest on its current course
+    var threat = null, threatD = Infinity, target = null, targetD = Infinity;
+    for (var i = 0; i < rocks.length; i++) {
+      var r = rocks[i];
+      var d = A.dist(r.x, r.y, ship.x, ship.y) - r.r;
+      if (d < targetD) { targetD = d; target = r; }
+      // closing speed along the line to the ship
+      var dx = ship.x - r.x, dy = ship.y - r.y, len = Math.hypot(dx, dy) || 1;
+      var closing = (r.vx * dx + r.vy * dy) / len;
+      if (closing > 0 && d < threatD) { threatD = d; threat = r; }
+    }
+
+    // dodge first: thrust away from anything bearing down on it
+    if (threat && threatD < aiDanger()) {
+      var away = Math.atan2(ship.y - threat.y, ship.x - threat.x);
+      ship.wantA = away + A.rnd(-aiAimErr(), aiAimErr());
+      ship.wantThrust = true;
+      // still take the shot if it happens to be lined up
+      aiFire = Math.abs(angDiff(ship.a, Math.atan2(threat.y - ship.y, threat.x - ship.x))) < 0.25;
+      return;
+    }
+
+    // otherwise line up on the nearest rock, leading it
+    if (target) {
+      var t = targetD / 520;
+      var px = target.x + target.vx * t, py = target.y + target.vy * t;
+      ship.wantA = Math.atan2(py - ship.y, px - ship.x) + A.rnd(-aiAimErr(), aiAimErr());
+      ship.wantThrust = false;
+      aiFire = Math.abs(angDiff(ship.a, ship.wantA)) < 0.22;
+    }
+  }
+
+  function aiDrive(dt) {
+    if (ship.wantA === undefined) return;
+    var turn = 3.4 * dt;
+    var d = angDiff(ship.a, ship.wantA);
+    if (Math.abs(d) <= turn) ship.a = ship.wantA;
+    else ship.a += Math.sign(d) * turn;
+    if (ship.wantThrust) {
+      ship.vx += Math.cos(ship.a) * 420 * dt;
+      ship.vy += Math.sin(ship.a) * 420 * dt;
+      ship.thrust = true;
+    } else ship.thrust = false;
+  }
+
+  // ---------------------------------------------------------- you, throwing
+  function sendRock(tx, ty) {
+    if (mode !== "flip" || !running || sendCool > 0) return;
+    sendCool = SEND_COOLDOWN;
+    // enters from whichever edge is nearest the point you clicked, aimed at it
+    var left = tx, right = W - tx, top = ty, bot = H - ty;
+    var m = Math.min(left, right, top, bot);
+    var sx, sy;
+    if (m === left) { sx = -30; sy = ty; }
+    else if (m === right) { sx = W + 30; sy = ty; }
+    else if (m === top) { sx = tx; sy = -30; }
+    else { sx = tx; sy = H + 30; }
+    var ang = Math.atan2(ty - sy, tx - sx);
+    var sp = A.rnd(70, 110) + Math.min(sent * 2.5, 45);
+    rocks.push(makeRock(sx, sy, 3, Math.cos(ang) * sp, Math.sin(ang) * sp));
+    sent++;
+    el.score.textContent = sent;
+    sync();
+    if (sent >= SURVIVE_TO_WIN) pilotWins();
+  }
+
+  // ------------------------------------------------------------ game state
   function spawnWave() {
     rocks = [];
     var n = Math.min(3 + wave, 9);
     for (var i = 0; i < n; i++) {
-      // never spawn right on top of the ship
       var x, y, guard = 0;
-      do {
-        x = A.rnd(0, W); y = A.rnd(0, H); guard++;
-      } while (guard < 200 && A.dist(x, y, W / 2, H / 2) < 150);
+      do { x = A.rnd(0, W); y = A.rnd(0, H); guard++; }
+      while (guard < 200 && A.dist(x, y, W / 2, H / 2) < 150);
       rocks.push(makeRock(x, y, 3));
     }
   }
 
   function resetShip() {
     ship = { x: W / 2, y: H / 2, vx: 0, vy: 0, a: -Math.PI / 2 };
-    invuln = 2.2;
+    invuln = mode === "flip" ? 1.2 : 2.2;
   }
 
   function newGame() {
-    score = 0; lives = 3; wave = 1; bullets = []; bits = []; cool = 0;
+    score = 0; wave = 1; bullets = []; bits = []; cool = 0;
+    sent = 0; survived = 0; sendCool = 0; aiCool = 0; aiFire = false;
+    lives = mode === "flip" ? 1 : 3;
     resetShip();
-    spawnWave();
+    if (mode === "flip") rocks = []; else spawnWave();
+    syncLabels();
     sync();
   }
 
+  function syncLabels() {
+    var flip = mode === "flip";
+    el.modeTag.textContent = flip ? "· you send the rocks" : "";
+    el.scoreLabel.textContent = flip ? "Rocks sent" : "Score";
+    el.bestLabel.textContent = flip ? "Best (fewest)" : "Best";
+    el.waveWrap.hidden = flip;
+    el.lifeWrap.hidden = flip;
+    el.skillWrap.hidden = !flip;
+    el.touch.style.display = flip ? "none" : "";
+    el.hint.textContent = flip
+      ? "Click to send a rock in from the nearest edge, aimed where you clicked. Bring the pilot down in as few as you can."
+      : "Turn, thrust, shoot. Big rocks split into smaller ones.";
+  }
+
   function sync() {
-    el.score.textContent = score;
+    el.score.textContent = mode === "flip" ? sent : score;
     el.wave.textContent = wave;
     el.lives.textContent = lives;
-    el.best.textContent = A.best("asteroids");
+    el.skill.textContent = skillTier() + 1;
+    el.best.textContent = A.best(mode === "flip" ? "asteroids-flip" : "asteroids");
   }
 
   function burst(x, y, n, color) {
@@ -113,11 +236,8 @@
     if (cool > 0 || bullets.length >= 5) return;
     cool = 0.22;
     bullets.push({
-      x: ship.x + Math.cos(ship.a) * 16,
-      y: ship.y + Math.sin(ship.a) * 16,
-      vx: Math.cos(ship.a) * 520 + ship.vx,
-      vy: Math.sin(ship.a) * 520 + ship.vy,
-      life: 1.15
+      x: ship.x + Math.cos(ship.a) * 16, y: ship.y + Math.sin(ship.a) * 16,
+      vx: Math.cos(ship.a) * 520 + ship.vx, vy: Math.sin(ship.a) * 520 + ship.vy, life: 1.15
     });
   }
 
@@ -132,34 +252,57 @@
 
   function gameOver() {
     running = false;
-    var b = A.best("asteroids", score);
-    el.best.textContent = b;
-    ov.show("<h2>Ship lost</h2><p>Final score <b>" + score + "</b>" +
-      (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
-      '<button class="btn go" data-act="restart">Play again</button>' +
-      '<a class="btn" href="../index.html">All games</a>');
+    if (mode === "play") {
+      var b = A.best("asteroids", score);
+      el.best.textContent = b;
+      ov.show("<h2>Ship lost</h2><p>Final score <b>" + score + "</b>" +
+        (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
+        '<button class="btn go" data-act="start-play">Play again</button>' +
+        '<button class="btn" data-act="start-flip">Send the rocks instead</button>');
+    } else {
+      var prev = 0;
+      try { prev = parseInt(localStorage.getItem("evercharge:asteroids-flip-raw") || "0", 10) || 0; } catch (e) {}
+      var fewest = prev === 0 ? sent : Math.min(prev, sent);
+      try { localStorage.setItem("evercharge:asteroids-flip-raw", String(fewest)); } catch (e) {}
+      el.best.textContent = fewest;
+      ov.show("<h2>You got it</h2><p>The pilot went down after <b>" + sent + "</b> rock" +
+        (sent === 1 ? "" : "s") + ", flying at skill " + (skillTier() + 1) + " of 3.</p>" +
+        '<button class="btn go" data-act="start-flip">Go again</button>' +
+        '<button class="btn" data-act="start-play">Fly it yourself</button>');
+    }
+  }
+
+  function pilotWins() {
+    running = false;
+    ov.show("<h2>The pilot held out</h2><p>It survived all <b>" + SURVIVE_TO_WIN +
+      "</b> rocks you threw. Hit it early and from two sides — it is slowest to react at the start.</p>" +
+      '<button class="btn go" data-act="start-flip">Go again</button>' +
+      '<button class="btn" data-act="start-play">Fly it yourself</button>');
   }
 
   function update(dt) {
     cool -= dt;
+    sendCool -= dt;
     if (invuln > 0) invuln -= dt;
 
-    if (k.any("ArrowLeft", "a", "A")) ship.a -= 3.4 * dt;
-    if (k.any("ArrowRight", "d", "D")) ship.a += 3.4 * dt;
-    var thrusting = k.any("ArrowUp", "w", "W");
-    if (thrusting) {
-      ship.vx += Math.cos(ship.a) * 420 * dt;
-      ship.vy += Math.sin(ship.a) * 420 * dt;
+    if (mode === "play") {
+      if (k.any("ArrowLeft", "a", "A")) ship.a -= 3.4 * dt;
+      if (k.any("ArrowRight", "d", "D")) ship.a += 3.4 * dt;
+      ship.thrust = k.any("ArrowUp", "w", "W");
+      if (ship.thrust) { ship.vx += Math.cos(ship.a) * 420 * dt; ship.vy += Math.sin(ship.a) * 420 * dt; }
+      if (k.any(" ")) shoot();
+    } else {
+      aiThink(dt);
+      aiDrive(dt);
+      if (aiFire) shoot();
     }
-    if (k.any(" ")) shoot();
 
     var drag = Math.pow(0.55, dt);
     ship.vx *= drag; ship.vy *= drag;
-    var sp = Math.sqrt(ship.vx * ship.vx + ship.vy * ship.vy);
+    var sp = Math.hypot(ship.vx, ship.vy);
     if (sp > 360) { ship.vx = ship.vx / sp * 360; ship.vy = ship.vy / sp * 360; }
     ship.x += ship.vx * dt; ship.y += ship.vy * dt;
     wrap(ship);
-    ship.thrust = thrusting;
 
     var i, j;
     for (i = bullets.length - 1; i >= 0; i--) {
@@ -178,10 +321,13 @@
         if (A.dist(r.x, r.y, bullets[j].x, bullets[j].y) < r.r) {
           bullets.splice(j, 1);
           burst(r.x, r.y, 12, "#C3C7D6");
-          score += (4 - r.size) * 25;
+          if (mode === "play") score += (4 - r.size) * 25;
           if (r.size > 1) {
             rocks.push(makeRock(r.x, r.y, r.size - 1));
             rocks.push(makeRock(r.x, r.y, r.size - 1));
+          } else if (mode === "flip") {
+            survived++;                       // a rock fully dealt with
+            sync();
           }
           rocks.splice(i, 1);
           sync();
@@ -199,11 +345,8 @@
       if (p.life <= 0) bits.splice(i, 1);
     }
 
-    if (rocks.length === 0) {
-      wave++;
-      score += 100;
-      sync();
-      spawnWave();
+    if (mode === "play" && rocks.length === 0) {
+      wave++; score += 100; sync(); spawnWave();
       invuln = Math.max(invuln, 1.4);
     }
   }
@@ -211,30 +354,20 @@
   function draw() {
     ctx.fillStyle = "#101320";
     ctx.fillRect(0, 0, W, H);
-
-    // starfield
     ctx.fillStyle = "rgba(255,255,255,.18)";
-    for (var s = 0; s < 70; s++) {
-      var sx = (s * 7919) % W, sy = (s * 104729) % H;
-      ctx.fillRect(sx, sy, 1.6, 1.6);
-    }
+    for (var s = 0; s < 70; s++) ctx.fillRect((s * 7919) % W, (s * 104729) % H, 1.6, 1.6);
 
     ctx.strokeStyle = "#C3C7D6";
     ctx.lineWidth = 2;
     rocks.forEach(function (r) {
-      ctx.save();
-      ctx.translate(r.x, r.y);
-      ctx.rotate(r.rot);
+      ctx.save(); ctx.translate(r.x, r.y); ctx.rotate(r.rot);
       ctx.beginPath();
       for (var i = 0; i < r.pts.length; i++) {
-        var a = (i / r.pts.length) * Math.PI * 2;
-        var rad = r.r * r.pts[i];
+        var a = (i / r.pts.length) * Math.PI * 2, rad = r.r * r.pts[i];
         var px = Math.cos(a) * rad, py = Math.sin(a) * rad;
         if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
       }
-      ctx.closePath();
-      ctx.stroke();
-      ctx.restore();
+      ctx.closePath(); ctx.stroke(); ctx.restore();
     });
 
     bits.forEach(function (p) {
@@ -245,43 +378,67 @@
     ctx.globalAlpha = 1;
 
     ctx.fillStyle = "#5BC8E8";
-    bullets.forEach(function (b) {
-      ctx.beginPath(); ctx.arc(b.x, b.y, 2.6, 0, Math.PI * 2); ctx.fill();
-    });
+    bullets.forEach(function (b) { ctx.beginPath(); ctx.arc(b.x, b.y, 2.6, 0, Math.PI * 2); ctx.fill(); });
 
     if (lives > 0) {
       ctx.save();
-      ctx.translate(ship.x, ship.y);
-      ctx.rotate(ship.a);
+      ctx.translate(ship.x, ship.y); ctx.rotate(ship.a);
       ctx.globalAlpha = invuln > 0 ? (Math.sin(invuln * 22) > 0 ? 0.35 : 1) : 1;
       if (ship.thrust) {
         ctx.fillStyle = "#F5A15B";
-        ctx.beginPath();
-        ctx.moveTo(-10, -5); ctx.lineTo(-10 - A.rnd(7, 15), 0); ctx.lineTo(-10, 5);
+        ctx.beginPath(); ctx.moveTo(-10, -5); ctx.lineTo(-10 - A.rnd(7, 15), 0); ctx.lineTo(-10, 5);
         ctx.closePath(); ctx.fill();
       }
-      ctx.strokeStyle = "#ECEEF5";
+      ctx.strokeStyle = mode === "flip" ? "#9B8CF0" : "#ECEEF5";
       ctx.lineWidth = 2;
       ctx.beginPath();
       ctx.moveTo(16, 0); ctx.lineTo(-11, -10); ctx.lineTo(-6, 0); ctx.lineTo(-11, 10);
-      ctx.closePath();
-      ctx.stroke();
+      ctx.closePath(); ctx.stroke();
       ctx.restore();
       ctx.globalAlpha = 1;
     }
+
+    if (mode === "flip" && running) {
+      ctx.fillStyle = "rgba(255,255,255,.85)";
+      ctx.font = "800 22px 'Bricolage Grotesque', ui-sans-serif, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(survived + " / " + SURVIVE_TO_WIN + " cleared", W / 2, 32);
+      ctx.font = "600 14px ui-sans-serif, system-ui, sans-serif";
+      ctx.fillStyle = sendCool > 0 ? "rgba(255,255,255,.22)" : "rgba(255,255,255,.6)";
+      ctx.fillText(sendCool > 0 ? "reloading…" : "click to send a rock", W / 2, H - 16);
+    }
   }
 
-  ov.onClick("[data-act]", function () {
+  canvas.addEventListener("pointerdown", function (e) {
+    if (mode !== "flip") return;
+    e.preventDefault();
+    var r = canvas.getBoundingClientRect();
+    sendRock((e.clientX - r.left) * (W / r.width), (e.clientY - r.top) * (H / r.height));
+  });
+
+  function menu() {
+    running = false;
+    ov.show("<h2>Asteroids</h2><p>Pick a side.</p>" +
+      '<button class="btn go" data-act="start-play">You fly</button>' +
+      '<button class="btn" data-act="start-flip">You send the rocks</button>' +
+      '<div class="keys"><b>You fly:</b> arrows to turn and thrust, space to fire.<br>' +
+      '<b>You send the rocks:</b> the computer flies. Click to throw a rock in from the nearest edge. ' +
+      'It dodges and shoots on the same controls you get, and sharpens up as it clears them.</div>');
+  }
+
+  ov.onClick("[data-act]", function (b) {
+    mode = b.getAttribute("data-act") === "start-flip" ? "flip" : "play";
     newGame();
     running = true;
     ov.hide();
   });
 
+  // state hook for the automated tests
+  window.__ast = function () { return { ship: ship, rocks: rocks, bullets: bullets, mode: mode, sent: sent, survived: survived }; };
+
+  mode = "play";
   newGame();
-  running = false;
-  ov.show("<h2>Asteroids</h2><p>Break the rocks apart without flying into one. Each rock splits twice.</p>" +
-    '<button class="btn go" data-act="start">Start</button>' +
-    '<div class="keys"><kbd>←</kbd> <kbd>→</kbd> turn · <kbd>↑</kbd> thrust · <kbd>Space</kbd> fire<br>You wrap around the edges of the screen</div>');
+  menu();
 
   A.loop(function (dt) {
     if (running) update(dt);
