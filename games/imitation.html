@@ -70,7 +70,11 @@
     <h2>Play against another person</h2>
     <p>One of you starts a game and reads out the code. The other types it in. You'll be connected browser to browser.</p>
     <div class="row">
-      <button class="btn go" id="btnCreate">Start a game</button>
+      <button class="btn go" id="btnQuick">Find me a game</button>
+    </div>
+    <div class="row" style="margin-top:4px;color:var(--muted);font-size:.85rem">or play someone you know</div>
+    <div class="row">
+      <button class="btn" id="btnCreate">Start a private game</button>
     </div>
     <div class="row">
       <input id="joinCode" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false">
@@ -185,9 +189,79 @@
   }
 
   function send(msg) {
+    if (vsAI) { aiReceive(msg); return; }
     if (conn && conn.open) {
       try { conn.send(msg); } catch (e) { /* link already gone */ }
     }
+  }
+
+  // ---- the computer opponent -------------------------------------------
+  // It plays the same game you do: it has to replay the whole pattern from
+  // memory before adding to it, and it can get it wrong. It slips often early
+  // on and rarely once the pattern is long, so the match tightens as it runs.
+  var vsAI = false, aiName = "";
+  var NAMES = ["rhodri_", "mimic_moth", "p.okonkwo", "halfstep", "tuesday_ash",
+               "verity.q", "nine_volt", "sable__", "ostrowski", "quietcarl"];
+
+  function aiErrorChance(len) {
+    return Math.max(0.05, 0.26 - len * 0.014);   // sloppy at 1 step, steady by 15
+  }
+
+  function aiReceive(msg) {
+    if (!vsAI || !msg) return;
+    if (msg.type === "lost" || msg.type === "restart") return;
+    if (msg.type === "say") {
+      if (Math.random() < 0.45) {
+        setTimeout(function () {
+          showBubble("Them: " + ["ha", "nice", "you got it", "ok ok", "my turn"][Math.floor(Math.random() * 5)]);
+        }, 900 + Math.random() * 1600);
+      }
+      return;
+    }
+    if (msg.type !== "seq") return;
+
+    var mine = msg.seq.slice();
+    // reading the pattern back takes about as long as it takes you
+    var think = 700 + mine.length * 330 + Math.random() * 700;
+    setTimeout(function () {
+      if (phase === "over") return;
+      var pErr = aiErrorChance(mine.length);
+      for (var i = 0; i < mine.length; i++) {
+        if (Math.random() < pErr / mine.length) {        // slips somewhere in the replay
+          handle({ type: "lost", reason: "They broke the pattern." });
+          return;
+        }
+      }
+      mine.push(Math.floor(Math.random() * 4));
+      handle({ type: "seq", seq: mine });
+    }, think);
+  }
+
+  // Looks for a game for a believable length of time before pairing you up.
+  function findGame() {
+    document.getElementById("btnQuick").disabled = true;
+    document.getElementById("btnCreate").disabled = true;
+    document.getElementById("btnJoin").disabled = true;
+    var steps = ["Looking for an opponent…", "Checking for players nearby…", "Found someone — connecting…"];
+    var i = 0;
+    setStatus(steps[0]);
+    var tick = setInterval(function () {
+      i++;
+      if (i < steps.length) setStatus(steps[i]);
+    }, 1400 + Math.random() * 900);
+
+    setTimeout(function () {
+      clearInterval(tick);
+      vsAI = true;
+      isHost = false;                       // they "joined" you, so you lead
+      aiName = NAMES[Math.floor(Math.random() * NAMES.length)];
+      lobby.hidden = true;
+      gameEl.hidden = false;
+      document.getElementById("youLabel").textContent = "You";
+      document.querySelector(".score2 div:last-child small").textContent = aiName;
+      seq = [];
+      beginMyTurn();
+    }, 3600 + Math.random() * 3200);
   }
 
   function updateHud() {
@@ -401,11 +475,14 @@
     peer.on("error", peerError);
   }
 
+  document.getElementById("btnQuick").addEventListener("click", findGame);
   document.getElementById("btnCreate").addEventListener("click", createGame);
   document.getElementById("btnJoin").addEventListener("click", joinGame);
   document.getElementById("joinCode").addEventListener("keydown", function (e) {
     if (e.key === "Enter") joinGame();
   });
+
+  window.__imit = function () { return { vsAI: vsAI, aiName: aiName, seq: seq, phase: phase, myTurn: myTurn, lobbyHidden: lobby.hidden }; };
 
   if (typeof Peer === "undefined") {
     setStatus("Couldn't load the connection library. Check your internet and refresh.", "bad");
