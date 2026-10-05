@@ -13,12 +13,13 @@
 <main class="wrap">
   <div class="bar">
     <a class="back" href="../index.html">← All games</a>
-    <div class="title">Breakout</div>
+    <div class="title">Breakout <span id="modeTag" class="tag-inline"></span></div>
     <div class="stats">
-      <div class="stat"><small>Score</small><b id="score">0</b></div>
-      <div class="stat"><small>Level</small><b id="level">1</b></div>
-      <div class="stat"><small>Lives</small><b id="lives">3</b></div>
-      <div class="stat"><small>Best</small><b id="best">0</b></div>
+      <div class="stat"><small id="aLabel">Score</small><b id="aScore">0</b></div>
+      <div class="stat" id="bWrap" hidden><small>Computer</small><b id="bScore">0</b></div>
+      <div class="stat" id="lvWrap"><small>Level</small><b id="level">1</b></div>
+      <div class="stat" id="lifeWrap"><small>Lives</small><b id="lives">3</b></div>
+      <div class="stat"><small id="bestLabel">Best</small><b id="best">0</b></div>
     </div>
   </div>
 
@@ -29,10 +30,10 @@
 
   <div class="touch">
     <button data-key="ArrowLeft">←</button>
-    <button class="wide" data-key=" ">Launch</button>
+    <button class="wide" data-key=" ">Serve</button>
     <button data-key="ArrowRight">→</button>
   </div>
-  <p class="hint">Clear every brick. The ball speeds up as you go.</p>
+  <p class="hint" id="hint">Clear every brick. The ball speeds up as you go.</p>
 </main>
 
 <script src="../arcade.js"></script>
@@ -40,49 +41,93 @@
 (function () {
   "use strict";
   var A = window.Arcade;
-  var W = 720, H = 520;
-  var ctx = A.fit(document.getElementById("c"), W, H);
+  var W = 720, H = 560;
+  var canvas = document.getElementById("c");
+  var ctx = A.fit(canvas, W, H);
   var k = A.keys();
   var ov = A.overlay(document.getElementById("ov"));
-  var el = {
-    score: document.getElementById("score"), level: document.getElementById("level"),
-    lives: document.getElementById("lives"), best: document.getElementById("best")
-  };
   var stage = document.querySelector(".stage");
+  var el = {
+    a: document.getElementById("aScore"), b: document.getElementById("bScore"),
+    aLabel: document.getElementById("aLabel"), bWrap: document.getElementById("bWrap"),
+    level: document.getElementById("level"), lvWrap: document.getElementById("lvWrap"),
+    lives: document.getElementById("lives"), lifeWrap: document.getElementById("lifeWrap"),
+    best: document.getElementById("best"), bestLabel: document.getElementById("bestLabel"),
+    modeTag: document.getElementById("modeTag"), hint: document.getElementById("hint")
+  };
   A.touchKeys(document.querySelector(".touch"), k);
 
   var COLORS = ["#FF6B6B", "#F5A15B", "#F2D06B", "#4CC98A", "#5BC8E8", "#9B8CF0"];
-  var PAD_W = 110, PAD_H = 14, BALL_R = 8;
+  var PAD_W = 112, PAD_H = 14, BALL_R = 8;
+  var HUMAN_Y = H - 40, AI_Y = 26;
+  var WIN_POINTS = 7;
 
-  var paddle, ball, bricks, score, lives, level, stuck, running, pointerX = null;
+  var mode = "solo";            // "solo" = you vs the bricks · "versus" = you vs the computer
+  var paddle, ai, ball, bricks, score, lives, level, stuck, running, pointerX = null;
+  var pts, lastTouch, aiTarget, aiThink, served;
 
+  // ------------------------------------------------------------- the wall
   function makeBricks(lv) {
-    var rows = Math.min(4 + lv, 7), cols = 10;
-    var pad = 8, left = 42, top = 64;
-    var bw = (W - left * 2 - pad * (cols - 1)) / cols, bh = 24;
     var out = [];
-    for (var r = 0; r < rows; r++) {
-      for (var c = 0; c < cols; c++) {
-        // a few tougher bricks appear from level 3
-        var hp = (lv >= 3 && r === 0) ? 2 : 1;
-        out.push({
-          x: left + c * (bw + pad), y: top + r * (bh + pad),
-          w: bw, h: bh, hp: hp, c: COLORS[r % COLORS.length]
-        });
-      }
+    if (mode === "versus") {
+      var rows = 4, cols = 10, pad = 8, left = 46, top = 208;
+      var bw = (W - left * 2 - pad * (cols - 1)) / cols, bh = 24;
+      for (var r = 0; r < rows; r++)
+        for (var c = 0; c < cols; c++)
+          out.push({ x: left + c * (bw + pad), y: top + r * (bh + pad), w: bw, h: bh, hp: 1, c: COLORS[r % COLORS.length] });
+      return out;
     }
+    var rws = Math.min(4 + lv, 7), cls = 10, p = 8, l = 42, t = 64;
+    var w2 = (W - l * 2 - p * (cls - 1)) / cls, h2 = 24;
+    for (var i = 0; i < rws; i++)
+      for (var j = 0; j < cls; j++)
+        out.push({ x: l + j * (w2 + p), y: t + i * (h2 + p), w: w2, h: h2, hp: (lv >= 3 && i === 0) ? 2 : 1, c: COLORS[i % COLORS.length] });
     return out;
   }
 
-  function resetBall() {
-    stuck = true;
-    ball = { x: paddle.x + PAD_W / 2, y: H - 46 - BALL_R, vx: 0, vy: 0 };
+  // ---------------------------------------------------------- the opponent
+  // Difficulty climbs with the total points on the board: slow and sloppy at
+  // first, quick and accurate by the end. It only ever reads the ball.
+  function aiLevel() { return Math.min(12, pts.a + pts.b); }
+  function aiSpeed() { return 300 + aiLevel() * 26; }        // 300 → 612 px/s
+  function aiError() { return Math.max(8, 62 - aiLevel() * 4.5); }
+  function aiThinkGap() { return Math.max(0.05, 0.20 - aiLevel() * 0.012); }
+
+  // Where will the ball cross the AI's paddle line? Bounces off the side walls
+  // are folded in; bricks are not, which is a fair source of mistakes.
+  function predictX() {
+    if (ball.vy >= 0) return W / 2;                 // heading away — drift to the middle
+    var x = ball.x, y = ball.y, vx = ball.vx, vy = ball.vy;
+    var guard = 0;
+    while (y > AI_Y + PAD_H && guard++ < 400) {
+      var tY = (AI_Y + PAD_H - y) / vy;
+      var tX = vx > 0 ? (W - BALL_R - x) / vx : vx < 0 ? (BALL_R - x) / vx : Infinity;
+      if (tX < tY) { x += vx * tX; y += vy * tX; vx = -vx; }
+      else { x += vx * tY; y += vy * tY; }
+    }
+    return x;
+  }
+
+  function resetBall(towardAI) {
+    stuck = mode === "solo";
+    served = false;
+    var sp = 320 + (mode === "versus" ? aiLevel() * 10 : (level - 1) * 26);
+    if (mode === "versus") {
+      ball = { x: W / 2, y: H / 2, vx: 0, vy: 0 };
+      var ang = A.rnd(-0.5, 0.5) + (towardAI ? -Math.PI / 2 : Math.PI / 2);
+      ball.vx = Math.cos(ang) * sp;
+      ball.vy = Math.sin(ang) * sp;
+      served = true;
+      lastTouch = null;
+    } else {
+      ball = { x: paddle.x + PAD_W / 2, y: HUMAN_Y - BALL_R, vx: 0, vy: 0 };
+    }
   }
 
   function launch() {
-    if (!stuck) return;
+    if (mode !== "solo" || !stuck) return;
     stuck = false;
-    var speed = 300 + (level - 1) * 26;
+    var speed = 320 + (level - 1) * 26;
     var ang = A.rnd(-0.6, 0.6) - Math.PI / 2;
     ball.vx = Math.cos(ang) * speed;
     ball.vy = Math.sin(ang) * speed;
@@ -90,29 +135,53 @@
 
   function newGame() {
     score = 0; lives = 3; level = 1;
+    pts = { a: 0, b: 0 };
     paddle = { x: (W - PAD_W) / 2 };
+    ai = { x: (W - PAD_W) / 2 };
+    aiTarget = W / 2; aiThink = 0;
     bricks = makeBricks(level);
-    resetBall();
+    resetBall(Math.random() < 0.5);
     sync();
     running = true;
   }
 
-  function nextLevel() {
-    level++;
-    paddle.x = (W - PAD_W) / 2;
-    bricks = makeBricks(level);
-    resetBall();
-    sync();
-    ov.show("<h2>Level " + level + "</h2><p>Nice. The ball comes back a little faster.</p>" +
-      '<button class="btn go" data-act="go">Continue</button>');
-    running = false;
-  }
-
   function sync() {
-    el.score.textContent = score;
+    var versus = mode === "versus";
+    el.modeTag.textContent = versus ? "· you vs the computer" : "";
+    el.aLabel.textContent = versus ? "You" : "Score";
+    el.bWrap.hidden = !versus;
+    el.lvWrap.hidden = versus;
+    el.lifeWrap.hidden = versus;
+    el.bestLabel.textContent = versus ? "Wins" : "Best";
+    el.hint.textContent = versus
+      ? "You are the bottom paddle. Break bricks for a point each, and win a point whenever the ball gets past the computer."
+      : "Clear every brick. The ball speeds up as you go.";
+    el.a.textContent = versus ? pts.a : score;
+    el.b.textContent = pts.b;
     el.level.textContent = level;
     el.lives.textContent = lives;
-    el.best.textContent = A.best("breakout");
+    el.best.textContent = A.best(versus ? "breakout-versus" : "breakout");
+  }
+
+  function point(who) {
+    pts[who]++;
+    sync();
+    if (pts.a >= WIN_POINTS || pts.b >= WIN_POINTS) return matchOver();
+    bricks = makeBricks(1);
+    resetBall(who === "a");       // loser serves toward the winner
+  }
+
+  function matchOver() {
+    running = false;
+    var won = pts.a > pts.b;
+    var wins = A.best("breakout-versus");
+    if (won) { wins = A.best("breakout-versus", wins + 1); }
+    el.best.textContent = wins;
+    ov.show("<h2>" + (won ? "You win " : "Computer wins ") + pts.a + "–" + pts.b + "</h2>" +
+      "<p>" + (won ? "Beat it at full speed — it was at level " + aiLevel() + " of 12."
+                   : "It gets quicker every point. Try again from the top.") + "</p>" +
+      '<button class="btn go" data-act="again-versus">Rematch</button>' +
+      '<button class="btn" data-act="again-solo">Play the bricks instead</button>');
   }
 
   function gameOver(won) {
@@ -121,30 +190,35 @@
     el.best.textContent = b;
     ov.show("<h2>" + (won ? "You cleared it!" : "Game over") + "</h2>" +
       "<p>Final score <b>" + score + "</b>" + (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
-      '<button class="btn go" data-act="restart">Play again</button>' +
-      '<a class="btn" href="../index.html">All games</a>');
+      '<button class="btn go" data-act="again-solo">Play again</button>' +
+      '<button class="btn" data-act="again-versus">Play the computer</button>');
   }
 
+  // ------------------------------------------------------------- the frame
   function update(dt) {
-    // paddle
-    var speed = 540;
-    if (pointerX !== null) {
-      paddle.x = A.clamp(pointerX - PAD_W / 2, 0, W - PAD_W);
-    } else {
+    var speed = 560;
+    if (pointerX !== null) paddle.x = A.clamp(pointerX - PAD_W / 2, 0, W - PAD_W);
+    else {
       if (k.any("ArrowLeft", "a", "A")) paddle.x -= speed * dt;
       if (k.any("ArrowRight", "d", "D")) paddle.x += speed * dt;
       paddle.x = A.clamp(paddle.x, 0, W - PAD_W);
     }
-
     if (k.any(" ", "Enter")) launch();
 
-    if (stuck) {
-      ball.x = paddle.x + PAD_W / 2;
-      ball.y = H - 46 - BALL_R;
-      return;
+    if (mode === "versus") {
+      aiThink -= dt;
+      if (aiThink <= 0) {
+        aiThink = aiThinkGap();
+        aiTarget = predictX() + A.rnd(-aiError(), aiError());
+      }
+      var want = A.clamp(aiTarget - PAD_W / 2, 0, W - PAD_W);
+      var mv = aiSpeed() * dt;
+      if (Math.abs(want - ai.x) <= mv) ai.x = want;
+      else ai.x += Math.sign(want - ai.x) * mv;
     }
 
-    // step in slices so a fast ball can't tunnel through a brick
+    if (stuck) { ball.x = paddle.x + PAD_W / 2; ball.y = HUMAN_Y - BALL_R; return; }
+
     var steps = Math.ceil(Math.max(Math.abs(ball.vx), Math.abs(ball.vy)) * dt / 6) || 1;
     var sdt = dt / steps;
     for (var s = 0; s < steps; s++) {
@@ -153,80 +227,110 @@
 
       if (ball.x < BALL_R) { ball.x = BALL_R; ball.vx = Math.abs(ball.vx); }
       if (ball.x > W - BALL_R) { ball.x = W - BALL_R; ball.vx = -Math.abs(ball.vx); }
-      if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
 
-      // paddle
-      var py = H - 46;
-      if (ball.vy > 0 && ball.y + BALL_R >= py && ball.y - BALL_R <= py + PAD_H &&
-          ball.x >= paddle.x - BALL_R && ball.x <= paddle.x + PAD_W + BALL_R) {
-        ball.y = py - BALL_R;
-        var hit = (ball.x - (paddle.x + PAD_W / 2)) / (PAD_W / 2); // -1..1
-        hit = A.clamp(hit, -1, 1);
-        var sp = Math.min(Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy) * 1.015, 640);
-        var ang = -Math.PI / 2 + hit * 1.05;
-        ball.vx = Math.cos(ang) * sp;
-        ball.vy = Math.sin(ang) * sp;
-      }
+      if (mode === "solo") {
+        if (ball.y < BALL_R) { ball.y = BALL_R; ball.vy = Math.abs(ball.vy); }
+      } else if (hitPaddle(ai.x, AI_Y, true)) { lastTouch = "b"; }
+
+      if (hitPaddle(paddle.x, HUMAN_Y, false)) lastTouch = "a";
 
       // bricks
       for (var i = 0; i < bricks.length; i++) {
-        var b = bricks[i];
-        if (ball.x + BALL_R < b.x || ball.x - BALL_R > b.x + b.w ||
-            ball.y + BALL_R < b.y || ball.y - BALL_R > b.y + b.h) continue;
-
-        // bounce off whichever side we were least overlapping
-        var ox = Math.min(ball.x + BALL_R - b.x, b.x + b.w - (ball.x - BALL_R));
-        var oy = Math.min(ball.y + BALL_R - b.y, b.y + b.h - (ball.y - BALL_R));
-        if (ox < oy) ball.vx = -ball.vx; else ball.vy = -ball.vy;
-
-        b.hp--;
-        if (b.hp <= 0) { bricks.splice(i, 1); score += 10 * level; }
-        else score += 4 * level;
-        sync();
+        var br = bricks[i];
+        if (ball.x + BALL_R < br.x || ball.x - BALL_R > br.x + br.w ||
+            ball.y + BALL_R < br.y || ball.y - BALL_R > br.y + br.h) continue;
+        var oxv = Math.min(ball.x + BALL_R - br.x, br.x + br.w - (ball.x - BALL_R));
+        var oyv = Math.min(ball.y + BALL_R - br.y, br.y + br.h - (ball.y - BALL_R));
+        if (oxv < oyv) ball.vx = -ball.vx; else ball.vy = -ball.vy;
+        br.hp--;
+        if (br.hp <= 0) {
+          bricks.splice(i, 1);
+          if (mode === "solo") score += 10 * level;
+          else if (lastTouch) { pts[lastTouch]++; sync();
+            if (pts.a >= WIN_POINTS || pts.b >= WIN_POINTS) { matchOver(); return; } }
+        } else if (mode === "solo") score += 4 * level;
+        if (mode === "solo") sync();
         break;
       }
 
-      if (bricks.length === 0) { nextLevel(); return; }
-
-      if (ball.y - BALL_R > H) {
-        lives--;
-        sync();
-        if (lives <= 0) { gameOver(false); return; }
-        paddle.x = (W - PAD_W) / 2;
-        resetBall();
-        return;
+      if (mode === "solo") {
+        if (bricks.length === 0) { nextLevel(); return; }
+        if (ball.y - BALL_R > H) {
+          lives--; sync();
+          if (lives <= 0) { gameOver(false); return; }
+          paddle.x = (W - PAD_W) / 2;
+          resetBall();
+          return;
+        }
+      } else {
+        if (ball.y - BALL_R > H) { point("b"); return; }     // past you
+        if (ball.y + BALL_R < 0) { point("a"); return; }     // past the computer
       }
     }
+  }
+
+  // Shared paddle bounce. `top` flips the geometry for the computer's paddle.
+  function hitPaddle(px, py, top) {
+    if (top) {
+      if (ball.vy > 0) return false;
+      if (ball.y - BALL_R > py + PAD_H || ball.y + BALL_R < py) return false;
+    } else {
+      if (ball.vy < 0) return false;
+      if (ball.y + BALL_R < py || ball.y - BALL_R > py + PAD_H) return false;
+    }
+    if (ball.x < px - BALL_R || ball.x > px + PAD_W + BALL_R) return false;
+    ball.y = top ? py + PAD_H + BALL_R : py - BALL_R;
+    var hit = A.clamp((ball.x - (px + PAD_W / 2)) / (PAD_W / 2), -1, 1);
+    var sp = Math.min(Math.sqrt(ball.vx * ball.vx + ball.vy * ball.vy) * 1.012, 660);
+    var ang = (top ? Math.PI / 2 : -Math.PI / 2) + hit * (top ? -1.05 : 1.05);
+    ball.vx = Math.cos(ang) * sp;
+    ball.vy = Math.sin(ang) * sp;
+    return true;
+  }
+
+  function nextLevel() {
+    level++;
+    paddle.x = (W - PAD_W) / 2;
+    bricks = makeBricks(level);
+    resetBall();
+    sync();
+    running = false;
+    ov.show("<h2>Level " + level + "</h2><p>Nice. The ball comes back a little faster.</p>" +
+      '<button class="btn go" data-act="resume">Continue</button>');
   }
 
   function draw() {
     ctx.fillStyle = "#161926";
     ctx.fillRect(0, 0, W, H);
 
+    if (mode === "versus") {
+      ctx.strokeStyle = "rgba(255,255,255,.07)";
+      ctx.setLineDash([8, 10]);
+      ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
     for (var i = 0; i < bricks.length; i++) {
       var b = bricks[i];
       ctx.globalAlpha = b.hp > 1 ? 1 : 0.85;
       ctx.fillStyle = b.c;
-      A.rrect(ctx, b.x, b.y, b.w, b.h, 6);
-      ctx.fill();
+      A.rrect(ctx, b.x, b.y, b.w, b.h, 6); ctx.fill();
       if (b.hp > 1) {
-        ctx.globalAlpha = 1;
-        ctx.strokeStyle = "rgba(255,255,255,.75)";
-        ctx.lineWidth = 2;
-        A.rrect(ctx, b.x + 3, b.y + 3, b.w - 6, b.h - 6, 4);
-        ctx.stroke();
+        ctx.globalAlpha = 1; ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = 2;
+        A.rrect(ctx, b.x + 3, b.y + 3, b.w - 6, b.h - 6, 4); ctx.stroke();
       }
     }
     ctx.globalAlpha = 1;
 
     ctx.fillStyle = "#ECEEF5";
-    A.rrect(ctx, paddle.x, H - 46, PAD_W, PAD_H, 7);
-    ctx.fill();
+    A.rrect(ctx, paddle.x, HUMAN_Y, PAD_W, PAD_H, 7); ctx.fill();
+    if (mode === "versus") {
+      ctx.fillStyle = "#FF8A7D";
+      A.rrect(ctx, ai.x, AI_Y, PAD_W, PAD_H, 7); ctx.fill();
+    }
 
     ctx.fillStyle = "#5BC8E8";
-    ctx.beginPath();
-    ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.beginPath(); ctx.arc(ball.x, ball.y, BALL_R, 0, Math.PI * 2); ctx.fill();
 
     if (stuck && running) {
       ctx.fillStyle = "rgba(255,255,255,.6)";
@@ -234,9 +338,16 @@
       ctx.textAlign = "center";
       ctx.fillText("Press Space to launch", W / 2, H - 76);
     }
+    if (mode === "versus") {
+      ctx.fillStyle = "rgba(255,255,255,.25)";
+      ctx.font = "800 15px 'Bricolage Grotesque', ui-sans-serif, sans-serif";
+      ctx.textAlign = "left";
+      ctx.fillText("COMPUTER  lv " + aiLevel(), 14, 18);
+      ctx.textAlign = "right";
+      ctx.fillText("YOU", W - 14, H - 10);
+    }
   }
 
-  // mouse / touch steering
   function pointerMove(e) {
     var r = stage.getBoundingClientRect();
     var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
@@ -248,18 +359,28 @@
   stage.addEventListener("click", function () { launch(); });
   window.addEventListener("keydown", function () { pointerX = null; });
 
+  function menu() {
+    running = false;
+    ov.show("<h2>Breakout</h2><p>Pick a side.</p>" +
+      '<button class="btn go" data-act="again-solo">You vs the bricks</button>' +
+      '<button class="btn" data-act="again-versus">You vs the computer</button>' +
+      '<div class="keys"><b>Vs the bricks:</b> clear the wall, three lives.<br>' +
+      '<b>Vs the computer:</b> two paddles, one ball, first to ' + WIN_POINTS + '. ' +
+      'Break a brick for a point, or win one when the ball slips past the other paddle. ' +
+      'The computer starts slow and sharpens up every point.</div>');
+  }
+
   ov.onClick("[data-act]", function (b) {
     var act = b.getAttribute("data-act");
-    if (act === "restart" || act === "start") newGame();
-    running = true;
+    if (act === "again-solo") { mode = "solo"; newGame(); }
+    else if (act === "again-versus") { mode = "versus"; newGame(); }
+    else running = true;
     ov.hide();
   });
 
+  mode = "solo";
   newGame();
-  running = false;
-  ov.show("<h2>Breakout</h2><p>Knock out every brick. You get three lives.</p>" +
-    '<button class="btn go" data-act="start">Start</button>' +
-    '<div class="keys"><kbd>←</kbd> <kbd>→</kbd> or move the mouse to steer · <kbd>Space</kbd> to launch</div>');
+  menu();
 
   A.loop(function (dt) {
     if (running) update(dt);
