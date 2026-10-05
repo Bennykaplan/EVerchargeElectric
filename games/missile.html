@@ -13,12 +13,13 @@
 <main class="wrap">
   <div class="bar">
     <a class="back" href="../index.html">← All games</a>
-    <div class="title">Missile</div>
+    <div class="title">Missile <span id="modeTag" class="tag-inline"></span></div>
     <div class="stats">
-      <div class="stat"><small>Score</small><b id="score">0</b></div>
-      <div class="stat"><small>Wave</small><b id="wave">1</b></div>
+      <div class="stat"><small id="scoreLabel">Score</small><b id="score">0</b></div>
+      <div class="stat" id="waveWrap"><small>Wave</small><b id="wave">1</b></div>
       <div class="stat"><small>Cities</small><b id="cities">6</b></div>
-      <div class="stat"><small>Best</small><b id="best">0</b></div>
+      <div class="stat" id="skillWrap" hidden><small>Defender</small><b id="skill">1</b></div>
+      <div class="stat"><small id="bestLabel">Best</small><b id="best">0</b></div>
     </div>
   </div>
 
@@ -26,7 +27,7 @@
     <canvas id="c"></canvas>
     <div class="overlay" id="ov"></div>
   </div>
-  <p class="hint">Click anywhere to fire an interceptor. It explodes where you clicked — the blast takes out any missile it touches.</p>
+  <p class="hint" id="hint">Click anywhere to fire an interceptor. It explodes where you clicked — the blast takes out any missile it touches.</p>
 </main>
 
 <script src="../arcade.js"></script>
@@ -41,77 +42,152 @@
   var ov = A.overlay(document.getElementById("ov"));
   var el = {
     score: document.getElementById("score"), wave: document.getElementById("wave"),
-    cities: document.getElementById("cities"), best: document.getElementById("best")
+    cities: document.getElementById("cities"), best: document.getElementById("best"),
+    scoreLabel: document.getElementById("scoreLabel"), bestLabel: document.getElementById("bestLabel"),
+    waveWrap: document.getElementById("waveWrap"), skill: document.getElementById("skill"),
+    skillWrap: document.getElementById("skillWrap"), modeTag: document.getElementById("modeTag"),
+    hint: document.getElementById("hint")
   };
 
-  var cities, enemies, friendly, blasts, score, wave, running, ammo, spawnLeft, spawnTimer, betweenWaves;
   var BASE = { x: W / 2, y: GROUND };
+  var FRIENDLY_SPEED = 460;
+  var ATTACK_BUDGET = 22;      // how many missiles you get in flipped mode
+  var ATTACK_COOLDOWN = 0.5;
+
+  var mode = "play";
+  var cities, enemies, friendly, blasts, score, wave, running, ammo, spawnLeft, spawnTimer, betweenWaves;
+  var sent, attackCool, aiCool;
 
   function newGame() {
     score = 0; wave = 1;
+    sent = 0; attackCool = 0; aiCool = 0;
     cities = [];
-    var spots = [90, 170, 250, 550, 630, 710];
-    spots.forEach(function (x) { cities.push({ x: x, alive: true }); });
+    [90, 170, 250, 550, 630, 710].forEach(function (x) { cities.push({ x: x, alive: true }); });
     startWave();
+    syncLabels();
     sync();
   }
 
   function startWave() {
     enemies = []; friendly = []; blasts = [];
     ammo = 12 + Math.min(wave, 6);
-    spawnLeft = 5 + wave * 2;
+    spawnLeft = mode === "flip" ? 0 : 5 + wave * 2;
     spawnTimer = 0.6;
     betweenWaves = false;
   }
 
-  function sync() {
-    el.score.textContent = score;
-    el.wave.textContent = wave;
-    el.cities.textContent = cities.filter(function (c) { return c.alive; }).length;
-    el.best.textContent = A.best("missile");
+  function syncLabels() {
+    var flip = mode === "flip";
+    el.modeTag.textContent = flip ? "· you attack, the computer defends" : "";
+    el.scoreLabel.textContent = flip ? "Missiles fired" : "Score";
+    el.bestLabel.textContent = flip ? "Best (fewest)" : "Best";
+    el.waveWrap.hidden = flip;
+    el.skillWrap.hidden = !flip;
+    el.hint.textContent = flip
+      ? "Click a city to send a missile at it. The computer intercepts — flatten all six before you run out."
+      : "Click anywhere to fire an interceptor. It explodes where you clicked — the blast takes out any missile it touches.";
   }
 
-  function spawnEnemy() {
-    var live = cities.filter(function (c) { return c.alive; });
-    var targets = live.length ? live.map(function (c) { return c.x; }) : [BASE.x];
-    var tx = targets[A.rndInt(0, targets.length - 1)] + A.rnd(-18, 18);
-    var sx = A.rnd(20, W - 20);
-    // speed climbs with the wave but is capped so late waves stay reactable
-    var sp = Math.min(44 + wave * 7, 120);
-    var dx = tx - sx, dy = GROUND - 0;
-    var len = Math.sqrt(dx * dx + dy * dy);
-    enemies.push({
-      x: sx, y: 0, sx: sx, sy: 0, tx: tx,
-      vx: dx / len * sp, vy: dy / len * sp
+  function sync() {
+    el.score.textContent = mode === "flip" ? (ATTACK_BUDGET - sent) : score;
+    el.scoreLabel.textContent = mode === "flip" ? "Missiles left" : "Score";
+    el.wave.textContent = wave;
+    el.cities.textContent = cities.filter(function (c) { return c.alive; }).length;
+    el.skill.textContent = skillTier() + 1;
+    el.best.textContent = A.best(mode === "flip" ? "missile-flip" : "missile");
+  }
+
+  // ------------------------------------------------------- the defender AI
+  function skillTier() {
+    if (sent < 6) return 0;
+    if (sent < 13) return 1;
+    return 2;
+  }
+  function aiReact() { return [0.42, 0.26, 0.15][skillTier()]; }   // seconds between launches
+  function aiAimErr() { return [46, 24, 10][skillTier()]; }        // px of aim scatter
+  function aiLead()   { return [0.55, 0.8, 1.0][skillTier()]; }    // how well it leads the target
+
+  function aiDefend(dt) {
+    aiCool -= dt;
+    if (aiCool > 0) return;
+
+    // the missile closest to landing that nothing is already flying at
+    var target = null, lowest = -1;
+    for (var i = 0; i < enemies.length; i++) {
+      var e = enemies[i];
+      if (e.covered) continue;
+      if (e.y > lowest) { lowest = e.y; target = e; }
+    }
+    if (!target) return;
+    aiCool = aiReact();
+
+    // where will it be when an interceptor could get there?
+    var px = target.x, py = target.y;
+    for (var k = 0; k < 3; k++) {
+      var t = A.dist(BASE.x, BASE.y, px, py) / FRIENDLY_SPEED;
+      px = target.x + target.vx * t * aiLead();
+      py = target.y + target.vy * t * aiLead();
+    }
+    px += A.rnd(-aiAimErr(), aiAimErr());
+    py += A.rnd(-aiAimErr(), aiAimErr());
+    py = A.clamp(py, 40, GROUND - 20);
+
+    target.covered = true;
+    launchInterceptor(px, py);
+  }
+
+  function launchInterceptor(mx, my) {
+    var dx = mx - BASE.x, dy = my - BASE.y;
+    var len = Math.hypot(dx, dy) || 1;
+    friendly.push({
+      x: BASE.x, y: BASE.y, sx: BASE.x, sy: BASE.y, tx: mx, ty: my,
+      vx: dx / len * FRIENDLY_SPEED, vy: dy / len * FRIENDLY_SPEED
     });
+  }
+
+  // ------------------------------------------------------------- attacking
+  function spawnEnemy(tx) {
+    var live = cities.filter(function (c) { return c.alive; });
+    if (tx === undefined) {
+      var targets = live.length ? live.map(function (c) { return c.x; }) : [BASE.x];
+      tx = targets[A.rndInt(0, targets.length - 1)] + A.rnd(-18, 18);
+    }
+    var sx = mode === "flip" ? A.clamp(tx + A.rnd(-160, 160), 20, W - 20) : A.rnd(20, W - 20);
+    var sp = mode === "flip" ? 96 + Math.min(sent * 2, 30) : Math.min(44 + wave * 7, 120);
+    var dx = tx - sx, dy = GROUND;
+    var len = Math.hypot(dx, dy);
+    enemies.push({ x: sx, y: 0, sx: sx, sy: 0, tx: tx, vx: dx / len * sp, vy: dy / len * sp, covered: false });
+  }
+
+  function playerAttack(mx) {
+    if (!running || sent >= ATTACK_BUDGET || attackCool > 0) return;
+    attackCool = ATTACK_COOLDOWN;
+    sent++;
+    spawnEnemy(A.clamp(mx, 20, W - 20));
+    sync();
   }
 
   function fireAt(mx, my) {
-    if (!running || betweenWaves) return;
-    if (ammo <= 0) return;
+    if (!running || betweenWaves || ammo <= 0) return;
     if (my > GROUND - 6) my = GROUND - 6;
     ammo--;
-    var dx = mx - BASE.x, dy = my - BASE.y;
-    var len = Math.sqrt(dx * dx + dy * dy) || 1;
-    var sp = 460;
-    friendly.push({
-      x: BASE.x, y: BASE.y, sx: BASE.x, sy: BASE.y,
-      tx: mx, ty: my, vx: dx / len * sp, vy: dy / len * sp
-    });
+    launchInterceptor(mx, my);
   }
 
-  function boom(x, y, friendlyBlast) {
-    blasts.push({ x: x, y: y, r: 0, max: friendlyBlast ? 58 : 34, grow: 150, state: 1 });
+  function boom(x, y, big) {
+    blasts.push({ x: x, y: y, r: 0, max: big ? 58 : 34, grow: 150, state: 1 });
   }
 
   function update(dt) {
     var i, j;
+    attackCool -= dt;
 
-    if (!betweenWaves) {
+    if (mode === "flip") {
+      aiDefend(dt);
+    } else if (!betweenWaves) {
       spawnTimer -= dt;
       if (spawnTimer <= 0 && spawnLeft > 0) {
-        spawnEnemy();
-        spawnLeft--;
+        spawnEnemy(); spawnLeft--;
         spawnTimer = Math.max(0.35, 1.5 - wave * 0.07);
       }
     }
@@ -131,14 +207,17 @@
       if (e.y >= GROUND) {
         boom(e.x, GROUND, false);
         enemies.splice(i, 1);
-        // flatten the nearest standing city
         var best = null, bd = 1e9;
         cities.forEach(function (c) {
           if (!c.alive) return;
           var d = Math.abs(c.x - e.x);
           if (d < bd) { bd = d; best = c; }
         });
-        if (best && bd < 44) { best.alive = false; sync(); }
+        if (best && bd < 44) {
+          best.alive = false;
+          sync();
+          if (mode === "flip" && cities.every(function (c) { return !c.alive; })) return attackerWins();
+        }
         continue;
       }
       for (j = 0; j < blasts.length; j++) {
@@ -146,8 +225,7 @@
         if (A.dist(e.x, e.y, bl.x, bl.y) < bl.r) {
           boom(e.x, e.y, false);
           enemies.splice(i, 1);
-          score += 25 * wave;
-          sync();
+          if (mode === "play") { score += 25 * wave; sync(); }
           break;
         }
       }
@@ -155,13 +233,15 @@
 
     for (i = blasts.length - 1; i >= 0; i--) {
       var b = blasts[i];
-      if (b.state === 1) {
-        b.r += b.grow * dt;
-        if (b.r >= b.max) b.state = -1;
-      } else {
-        b.r -= b.grow * 0.8 * dt;
-        if (b.r <= 0) blasts.splice(i, 1);
+      if (b.state === 1) { b.r += b.grow * dt; if (b.r >= b.max) b.state = -1; }
+      else { b.r -= b.grow * 0.8 * dt; if (b.r <= 0) blasts.splice(i, 1); }
+    }
+
+    if (mode === "flip") {
+      if (sent >= ATTACK_BUDGET && enemies.length === 0 && friendly.length === 0 && blasts.length === 0) {
+        if (cities.some(function (c) { return c.alive; })) return defenderWins();
       }
+      return;
     }
 
     if (!betweenWaves && spawnLeft === 0 && enemies.length === 0 && friendly.length === 0 && blasts.length === 0) {
@@ -183,16 +263,37 @@
     el.best.textContent = b;
     ov.show("<h2>All cities lost</h2><p>Final score <b>" + score + "</b>" +
       (score >= b && score > 0 ? " — a new best!" : "") + "</p>" +
-      '<button class="btn go" data-act="restart">Play again</button>' +
-      '<a class="btn" href="../index.html">All games</a>');
+      '<button class="btn go" data-act="start-play">Play again</button>' +
+      '<button class="btn" data-act="start-flip">Attack instead</button>');
+  }
+
+  function attackerWins() {
+    running = false;
+    var prev = 0;
+    try { prev = parseInt(localStorage.getItem("evercharge:missile-flip-raw") || "0", 10) || 0; } catch (e) {}
+    var fewest = prev === 0 ? sent : Math.min(prev, sent);
+    try { localStorage.setItem("evercharge:missile-flip-raw", String(fewest)); } catch (e) {}
+    el.best.textContent = fewest;
+    ov.show("<h2>All six flattened</h2><p>You got through with <b>" + sent + "</b> missile" +
+      (sent === 1 ? "" : "s") + ", against a defender at skill " + (skillTier() + 1) + " of 3.</p>" +
+      '<button class="btn go" data-act="start-flip">Go again</button>' +
+      '<button class="btn" data-act="start-play">Defend instead</button>');
+  }
+
+  function defenderWins() {
+    running = false;
+    var left = cities.filter(function (c) { return c.alive; }).length;
+    ov.show("<h2>The defender held</h2><p>You ran out of missiles with <b>" + left +
+      "</b> cit" + (left === 1 ? "y" : "ies") + " still standing. Send them in quick succession — " +
+      "it can only track one at a time.</p>" +
+      '<button class="btn go" data-act="start-flip">Go again</button>' +
+      '<button class="btn" data-act="start-play">Defend instead</button>');
   }
 
   function draw() {
     var sky = ctx.createLinearGradient(0, 0, 0, GROUND);
-    sky.addColorStop(0, "#0E1120");
-    sky.addColorStop(1, "#1E2742");
-    ctx.fillStyle = sky;
-    ctx.fillRect(0, 0, W, H);
+    sky.addColorStop(0, "#0E1120"); sky.addColorStop(1, "#1E2742");
+    ctx.fillStyle = sky; ctx.fillRect(0, 0, W, H);
 
     ctx.strokeStyle = "rgba(255,138,125,.55)";
     ctx.lineWidth = 1.6;
@@ -218,10 +319,8 @@
       ctx.beginPath(); ctx.arc(b.x, b.y, Math.max(b.r, 0), 0, Math.PI * 2); ctx.fill();
     });
 
-    ctx.fillStyle = "#2B2F42";
-    ctx.fillRect(0, GROUND, W, H - GROUND);
-    ctx.fillStyle = "#3C4360";
-    ctx.fillRect(0, GROUND, W, 4);
+    ctx.fillStyle = "#2B2F42"; ctx.fillRect(0, GROUND, W, H - GROUND);
+    ctx.fillStyle = "#3C4360"; ctx.fillRect(0, GROUND, W, 4);
 
     cities.forEach(function (c) {
       if (c.alive) {
@@ -235,40 +334,56 @@
       }
     });
 
-    // launcher
     ctx.fillStyle = "#ECEEF5";
     ctx.beginPath();
     ctx.moveTo(BASE.x - 22, GROUND); ctx.lineTo(BASE.x, GROUND - 26); ctx.lineTo(BASE.x + 22, GROUND);
     ctx.closePath(); ctx.fill();
 
-    // ammo readout
-    ctx.fillStyle = ammo > 3 ? "rgba(255,255,255,.85)" : "#FF8A7D";
     ctx.font = "700 14px ui-sans-serif, system-ui, sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("MISSILES " + ammo, BASE.x, GROUND - 34);
+    if (mode === "play") {
+      ctx.fillStyle = ammo > 3 ? "rgba(255,255,255,.85)" : "#FF8A7D";
+      ctx.fillText("MISSILES " + ammo, BASE.x, GROUND - 34);
+    } else {
+      ctx.fillStyle = "rgba(255,255,255,.75)";
+      ctx.fillText("DEFENDER", BASE.x, GROUND - 34);
+      ctx.fillStyle = attackCool > 0 ? "rgba(255,255,255,.25)" : "rgba(255,255,255,.65)";
+      ctx.fillText(attackCool > 0 ? "reloading…" : "click a city to strike it", W / 2, 24);
+    }
   }
 
-  function pointAt(e) {
+  canvas.addEventListener("pointerdown", function (e) {
+    e.preventDefault();
     var r = canvas.getBoundingClientRect();
-    var cx = (e.touches ? e.touches[0].clientX : e.clientX) - r.left;
-    var cy = (e.touches ? e.touches[0].clientY : e.clientY) - r.top;
-    fireAt(cx * (W / r.width), cy * (H / r.height));
+    var cx = (e.clientX - r.left) * (W / r.width);
+    var cy = (e.clientY - r.top) * (H / r.height);
+    if (mode === "flip") playerAttack(cx); else fireAt(cx, cy);
+  });
+
+  function menu() {
+    running = false;
+    ov.show("<h2>Missile</h2><p>Pick a side.</p>" +
+      '<button class="btn go" data-act="start-play">You defend</button>' +
+      '<button class="btn" data-act="start-flip">You attack</button>' +
+      '<div class="keys"><b>You defend:</b> click to detonate interceptors in front of incoming missiles.<br>' +
+      '<b>You attack:</b> the computer defends. Click a city to launch at it — you get ' + ATTACK_BUDGET +
+      ' missiles to flatten all six. The defender only tracks one missile at a time, and gets faster as you go.</div>');
   }
-  canvas.addEventListener("pointerdown", function (e) { e.preventDefault(); pointAt(e); });
 
   ov.onClick("[data-act]", function (b) {
     var act = b.getAttribute("data-act");
-    if (act === "restart" || act === "start") newGame();
-    if (act === "next") { wave++; startWave(); sync(); }
+    if (act === "next") { wave++; startWave(); sync(); running = true; ov.hide(); return; }
+    mode = act === "start-flip" ? "flip" : "play";
+    newGame();
     running = true;
     ov.hide();
   });
 
+  window.__mis = function () { return { mode: mode, cities: cities, enemies: enemies, friendly: friendly, sent: sent, ammo: ammo }; };
+
+  mode = "play";
   newGame();
-  running = false;
-  ov.show("<h2>Missile</h2><p>Incoming missiles are falling on your cities. Click to detonate an interceptor in their path.</p>" +
-    '<button class="btn go" data-act="start">Start</button>' +
-    '<div class="keys">Click or tap anywhere to fire · you have limited missiles each wave</div>');
+  menu();
 
   A.loop(function (dt) {
     if (running) update(dt);
